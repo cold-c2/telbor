@@ -36,7 +36,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(FOG_COLOR);
 scene.fog = new THREE.Fog(FOG_COLOR, 6, 46);
 
-const camera = new THREE.PerspectiveCamera(68, 400 / 300, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(68, 400 / 300, 0.05, 200);   // near 0.05 so the ADS gun doesn't clip
 scene.add(camera);   // REQUIRED: children of the camera (the first-person gun) only render if the camera is in the scene
 
 // ------------------------------------------------------------------ lights (driven by the day/night cycle)
@@ -237,11 +237,11 @@ function makeRifle() {
   const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.75, 6), dark);
   barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.02, -0.62); g.add(barrel);
   const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.16, 0.34), wood); stock.position.set(0, -0.03, 0.5); g.add(stock);
-  // U-shaped iron sight on top of the barrel (this is the aiming mark you center when you ADS)
+  // U-shaped iron sight: tight, short, seated directly on the barrel top
   const iron = ps1Material({ color: 0x101012 });
-  const postL = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.07, 0.016), iron); postL.position.set(-0.05, 0.12, -0.42); g.add(postL);
-  const postR = postL.clone(); postR.position.x = 0.05; g.add(postR);
-  const base = new THREE.Mesh(new THREE.BoxGeometry(0.116, 0.016, 0.016), iron); base.position.set(0, 0.09, -0.42); g.add(base);
+  const postL = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.05, 0.014), iron); postL.position.set(-0.032, 0.09, -0.42); g.add(postL);
+  const postR = postL.clone(); postR.position.x = 0.032; g.add(postR);
+  const base = new THREE.Mesh(new THREE.BoxGeometry(0.078, 0.014, 0.014), iron); base.position.set(0, 0.062, -0.42); g.add(base);
   // muzzle flash quad (hidden until fired)
   const flash = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5),
     new THREE.MeshBasicMaterial({ color: 0xffddaa, transparent: true, opacity: 0.95, fog: false, blending: THREE.AdditiveBlending, depthWrite: false }));
@@ -267,13 +267,20 @@ function makePaleFigure() {
   const armR = limb( 0.38, 1.5, 0.16, 0.75);
   const legL = limb(-0.15, 0.8, 0.2, 0.8);
   const legR = limb( 0.15, 0.8, 0.2, 0.8);
-  // arms held forward in a rifle-carry pose (so remote players look like they're aiming, not clipping)
-  armL.rotation.x = -1.35; armR.rotation.x = -1.35;
-  armL.rotation.y =  0.15; armR.rotation.y = -0.15;
-  const rifle = makeRifle();                     // sits in the hands out in front of the chest
-  rifle.position.set(0, 1.32, -0.55); g.add(rifle);
+  // gun rig: a chest pivot that yaws/pitches with where the player LOOKS, rifle held inside it
+  const gunPivot = new THREE.Group();
+  gunPivot.position.set(0, 1.35, 0); gunPivot.rotation.order = "YXZ";
+  g.add(gunPivot);
+  const rifle = makeRifle();
+  rifle.position.set(0.12, -0.02, -0.3);         // in the hands, slightly right of center
+  gunPivot.add(rifle);
+  // arms reach FORWARD onto the gun (+x pitches forward; ±y converges the hands on it)
+  armL.rotation.order = armR.rotation.order = "YXZ";
+  armL.rotation.set(1.45, -0.28, 0);             // left hand out on the fore-stock
+  armR.rotation.set(1.15,  0.28, 0);             // right hand back at the grip
   g.userData.limbs = { armL, armR, legL, legR, head };
   g.userData.rifle = rifle;
+  g.userData.gunPivot = gunPivot;
   g.userData.crouch = 0;
   return g;
 }
@@ -523,15 +530,21 @@ function frame(now) {
     f.userData.limbs.head.rotation.x = t.ph || 0;                            // look up/down
     f.userData.crv += ((t.cr ? 1 : 0) - f.userData.crv) * Math.min(1, dt * 10);
     f.scale.y = 1 - 0.32 * f.userData.crv;                                   // crouch
-    // rifle + arms follow their look pitch; raised to the shoulder when aiming; hidden when unequipped
-    const rif = f.userData.rifle;
-    if (rif) {
-      rif.visible = !!t.eq;
-      rif.rotation.x = t.ph || 0;
-      rif.position.y = 1.32 + (t.am ? 0.14 : 0);           // shoulder-height when ADS
-      const armPitch = -1.35 + (t.ph || 0) * 0.85;
-      f.userData.limbs.armL.rotation.x = t.eq ? armPitch : 0;
-      f.userData.limbs.armR.rotation.x = t.eq ? armPitch : 0;
+    // gun rig + arms track where they're looking; raised slightly on ADS; hidden when unequipped
+    const rig = f.userData.gunPivot;
+    if (rig) {
+      const lookOff = wrapAngle((t.hy ?? t.ry) - f.rotation.y);
+      rig.visible = !!t.eq;
+      rig.rotation.y = lookOff;
+      rig.rotation.x = t.ph || 0;
+      rig.position.y = 1.35 + (t.am ? 0.08 : 0);
+      const L2 = f.userData.limbs, up = (t.ph || 0) * 0.6;
+      if (t.eq) {
+        L2.armL.rotation.set(1.45 + up, lookOff - 0.28, 0);
+        L2.armR.rotation.set(1.15 + up, lookOff + 0.28, 0);
+      } else {
+        L2.armL.rotation.set(0, 0, 0); L2.armR.rotation.set(0, 0, 0);
+      }
     }
     const spd = Math.hypot(f.position.x - f.userData.px, f.position.z - f.userData.pz) / Math.max(dt, 1e-3);
     f.userData.px = f.position.x; f.userData.pz = f.position.z;
@@ -567,7 +580,7 @@ let viewRecoil = 0, viewBob = 0, lastFire = 0;
 let equipped = true, aiming = false, aimT = 0;
 const FIRE_COOLDOWN = 5000;                       // 5 seconds between shots
 const HIP = new THREE.Vector3(0.24, -0.2, -0.5);
-const ADS = new THREE.Vector3(0.0, -0.085, -0.28); // lines the U-sight up with screen center
+const ADS = new THREE.Vector3(0.0, -0.05, -0.34);  // lines the U-sight up with screen center
 
 function updateViewGun(dt, walking) {
   viewRecoil = Math.max(0, viewRecoil - dt * 6);
@@ -579,6 +592,7 @@ function updateViewGun(dt, walking) {
   const py = HIP.y + (ADS.y - HIP.y) * aimT + bob - viewRecoil * 0.04;
   const pz = HIP.z + (ADS.z - HIP.z) * aimT + viewRecoil * 0.06;
   viewGun.position.set(px, py, pz);
+  viewGun.scale.setScalar(0.85 - aimT * 0.3);      // shrinks toward the eye on ADS so the stock never crosses the near plane
   viewGun.rotation.x = -viewRecoil * 0.3;
   viewGun.visible = equipped && !editing;
   const fov = 68 - aimT * 16;                      // slight zoom when aiming
@@ -758,7 +772,7 @@ function updateRainSound() {
     rainGain = ctx.createGain(); rainGain.gain.value = 0;
     src.connect(hp).connect(rainGain).connect(listener.getInput()); src.start();
   }
-  rainGain.gain.value = rainInt * 0.12;
+  rainGain.gain.value = rainInt * 0.04;   // quiet patter, not a firehose
 }
 
 // ==================================================================
