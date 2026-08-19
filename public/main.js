@@ -8,6 +8,18 @@ const PIXEL_HEIGHT = 300;        // internal vertical resolution; width is deriv
 const FOG_COLOR  = 0xbdc2c0;     // pale desaturated grey-green haze
 const SNAP_GRID  = 130.0;        // PS1 vertex-snap resolution (lower = jitterier)
 
+// deterministic world: a fixed seed means EVERY player generates the exact same land
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const WORLD_SEED = 20080102;
+const rand = mulberry32(WORLD_SEED);   // use rand() for anything that must match across clients
+
 // ------------------------------------------------------------------ renderer
 const canvas = document.getElementById("view");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: "low-power" });
@@ -149,24 +161,25 @@ const colliders = [];
 // ------------------------------------------------------------------ forest (mixed species, denser, snow-aware)
 const forest = new THREE.Group(); scene.add(forest);
 function addTree(px, pz, kind, s) {
-  const snowy = snowAmount(px, pz) > 0.5;
+  const snowy = snowAmount(px, pz) > 0.4;
   let t;
   if (kind === "birch") t = makeBirch();
   else if (kind === "tall") t = makePineTall(snowy);
   else { t = makePine(); if (snowy) t.traverse(o => { if (o.isMesh && o.geometry.type === "ConeGeometry") o.material = snowPineMat; }); }
   t.position.set(px, terrainHeight(px, pz), pz);
-  t.scale.setScalar(s); t.rotation.y = Math.random() * Math.PI;
+  t.scale.setScalar(s); t.rotation.y = rand() * Math.PI;
   forest.add(t);
   colliders.push({ x: px, z: pz, r: 0.3 * s });     // thin trunks: you can walk between & under
 }
-for (let i = 0; i < 340; i++) {
-  const a = Math.random() * Math.PI * 2, r = 9 + Math.random() * 250;
+// area-uniform scatter (r = sqrt) so the whole map — including the far SNOW — stays densely wooded
+for (let i = 0; i < 900; i++) {
+  const a = rand() * Math.PI * 2, r = 8 + Math.sqrt(rand()) * 330;
   const px = Math.cos(a) * r, pz = Math.sin(a) * r;
-  const snowy = snowAmount(px, pz) > 0.5;
-  const roll = Math.random();
-  const kind = snowy ? (roll < 0.85 ? "tall" : "pine")
+  const snowy = snowAmount(px, pz) > 0.4;
+  const roll = rand();
+  const kind = snowy ? (roll < 0.9 ? "tall" : "pine")
                      : (roll < 0.4 ? "tall" : roll < 0.65 ? "birch" : "pine");
-  addTree(px, pz, kind, 0.85 + Math.random() * 1.1);
+  addTree(px, pz, kind, 0.85 + rand() * 1.1);
 }
 
 // ------------------------------------------------------------------ the stone hut with the screaming mouth
@@ -199,11 +212,11 @@ for (let i = 0; i < 340; i++) {
   const glyphMat = new THREE.MeshBasicMaterial({ color: 0x8b0f0f, fog: true });
   const glyphs = new THREE.Group();
   for (let i = 0; i < 60; i++) {
-    const w = 0.15 + Math.random() * 0.5;
+    const w = 0.15 + rand() * 0.5;
     const g = new THREE.Mesh(new THREE.PlaneGeometry(w, 0.12), glyphMat);
     g.rotation.x = -Math.PI / 2;
-    g.rotation.z = Math.random() * Math.PI;
-    g.position.set(-6 + (Math.random() - 0.5) * 9, 0.05, -18 + (Math.random() - 0.5) * 9);
+    g.rotation.z = rand() * Math.PI;
+    g.position.set(-6 + (rand() - 0.5) * 9, 0.05, -18 + (rand() - 0.5) * 9);
     glyphs.add(g);
   }
   scene.add(glyphs);
@@ -218,6 +231,11 @@ function makeRifle() {
   const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.75, 6), dark);
   barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.02, -0.62); g.add(barrel);
   const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.16, 0.34), wood); stock.position.set(0, -0.03, 0.5); g.add(stock);
+  // U-shaped iron sight on top of the barrel (this is the aiming mark you center when you ADS)
+  const iron = ps1Material({ color: 0x101012 });
+  const postL = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.07, 0.016), iron); postL.position.set(-0.05, 0.12, -0.42); g.add(postL);
+  const postR = postL.clone(); postR.position.x = 0.05; g.add(postR);
+  const base = new THREE.Mesh(new THREE.BoxGeometry(0.116, 0.016, 0.016), iron); base.position.set(0, 0.09, -0.42); g.add(base);
   // muzzle flash quad (hidden until fired)
   const flash = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5),
     new THREE.MeshBasicMaterial({ color: 0xffddaa, transparent: true, opacity: 0.95, fog: false, blending: THREE.AdditiveBlending, depthWrite: false }));
@@ -243,8 +261,11 @@ function makePaleFigure() {
   const armR = limb( 0.38, 1.5, 0.16, 0.75);
   const legL = limb(-0.15, 0.8, 0.2, 0.8);
   const legR = limb( 0.15, 0.8, 0.2, 0.8);
-  const rifle = makeRifle();                     // held out front in both hands
-  rifle.position.set(0.16, 1.28, -0.35); g.add(rifle);
+  // arms held forward in a rifle-carry pose (so remote players look like they're aiming, not clipping)
+  armL.rotation.x = -1.35; armR.rotation.x = -1.35;
+  armL.rotation.y =  0.15; armR.rotation.y = -0.15;
+  const rifle = makeRifle();                     // sits in the hands out in front of the chest
+  rifle.position.set(0, 1.32, -0.55); g.add(rifle);
   g.userData.limbs = { armL, armR, legL, legR, head };
   g.userData.rifle = rifle;
   g.userData.crouch = 0;
@@ -282,9 +303,19 @@ document.addEventListener("pointerlockchange", () => {
 });
 document.addEventListener("mousemove", e => {
   if (!locked) return;
-  headYaw -= e.movementX * 0.0022;
-  pitch    = Math.max(-1.3, Math.min(1.3, pitch - e.movementY * 0.0020));
+  const sens = aiming ? 0.0013 : 0.0022;            // steadier aim when scoped in
+  headYaw -= e.movementX * sens;
+  pitch    = Math.max(-1.3, Math.min(1.3, pitch - e.movementY * sens));
 });
+// equip / unequip the rifle, and hold right-click to aim down the U-sight
+addEventListener("keydown", (e) => {
+  if (editing) return;
+  if (e.code === "Digit1") equipGun(true);
+  else if (e.code === "Digit2") equipGun(false);
+});
+addEventListener("mousedown", (e) => { if (e.button === 2 && locked && !editing) aiming = true; });
+addEventListener("mouseup",   (e) => { if (e.button === 2) aiming = false; });
+addEventListener("contextmenu", (e) => e.preventDefault());
 
 // ------------------------------------------------------------------ multiplayer
 const remote = new Map(); // id -> figure
@@ -297,6 +328,9 @@ function connect() {
     if (m.t === "welcome") {
       myId = m.id;
       for (const o of m.others) spawnRemote(o.id, o);
+      setWorld(m.dayT, m.weather);
+    } else if (m.t === "world") {
+      setWorld(m.dayT, m.weather);
     } else if (m.t === "join") {
       spawnRemote(m.id, m);
     } else if (m.t === "move") {
@@ -386,9 +420,8 @@ function wrapAngle(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.P
 function turnToward(cur, target, t) { return cur + wrapAngle(target - cur) * Math.min(1, t); }
 function animateLimbs(fig, sw) {
   const L = fig.userData.limbs;
-  // opposite arm & leg swing together (natural gait)
+  // legs stride; arms stay in the fixed rifle-hold pose set in makePaleFigure
   L.legL.rotation.x =  sw; L.legR.rotation.x = -sw;
-  L.armL.rotation.x = -sw; L.armR.rotation.x =  sw;
 }
 
 // ------------------------------------------------------------------ main loop
@@ -401,7 +434,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
 
-  updateDay(dt); updateFx(dt); updateAnimals(dt);
+  updateDay(dt); updateFx(dt); updateGore(dt); updateAnimals(dt);
 
   // --- input (movement is relative to where you're LOOKING) ---
   crouching = (keys["ControlLeft"] || keys["ControlRight"]) && !editing;
@@ -502,17 +535,31 @@ function frame(now) {
 //  GUN  — first-person rifle: shoot, muzzle flash, smoke, sound
 // ==================================================================
 const viewGun = makeRifle(); viewGun.scale.setScalar(0.85);
-viewGun.position.set(0.24, -0.2, -0.5); camera.add(viewGun);
+camera.add(viewGun);
 let viewRecoil = 0, viewBob = 0, lastFire = 0;
+let equipped = true, aiming = false, aimT = 0;
+const FIRE_COOLDOWN = 5000;                       // 5 seconds between shots
+const HIP = new THREE.Vector3(0.24, -0.2, -0.5);
+const ADS = new THREE.Vector3(0.0, -0.085, -0.28); // lines the U-sight up with screen center
 
 function updateViewGun(dt, walking) {
   viewRecoil = Math.max(0, viewRecoil - dt * 6);
-  viewBob += dt * (walking ? 9 : 0);
-  const bob = walking ? Math.sin(viewBob) * 0.012 : 0;
-  viewGun.position.set(0.24, -0.2 + bob - viewRecoil * 0.04, -0.5 + viewRecoil * 0.06);
+  aimT += ((aiming && equipped ? 1 : 0) - aimT) * Math.min(1, dt * 12);
+  const canBob = walking && aimT < 0.5;
+  viewBob += dt * (canBob ? 9 : 0);
+  const bob = canBob ? Math.sin(viewBob) * 0.012 : 0;
+  const px = HIP.x + (ADS.x - HIP.x) * aimT;
+  const py = HIP.y + (ADS.y - HIP.y) * aimT + bob - viewRecoil * 0.04;
+  const pz = HIP.z + (ADS.z - HIP.z) * aimT + viewRecoil * 0.06;
+  viewGun.position.set(px, py, pz);
   viewGun.rotation.x = -viewRecoil * 0.3;
-  viewGun.visible = !editing;
+  viewGun.visible = equipped && !editing;
+  const fov = 68 - aimT * 16;                      // slight zoom when aiming
+  if (Math.abs(camera.fov - fov) > 0.05) { camera.fov = fov; camera.updateProjectionMatrix(); }
+  // center dot when hip-carrying the gun (the U-sight takes over when aiming)
+  document.getElementById("crosshair").classList.toggle("on", (equipped && !editing && aimT < 0.5) || editing);
 }
+function equipGun(on) { equipped = on; if (!on) aiming = false; }
 function showFlash(rifle) {
   const fl = rifle.userData.flash; if (!fl) return;
   fl.visible = true; fl.rotation.z = Math.random() * Math.PI;
@@ -524,18 +571,32 @@ function flashMuzzle(fig) {                        // remote player fired
   const mp = new THREE.Vector3(); rifle.userData.muzzle.getWorldPosition(mp); spawnSmoke(mp);
 }
 function fire() {
+  if (!equipped) return;
   const now = performance.now();
-  if (now - lastFire < 180) return;               // fire rate
+  if (now - lastFire < FIRE_COOLDOWN) return;      // 5-second bolt cycle
   lastFire = now; viewRecoil = 1;
   showFlash(viewGun);
-  const mp = new THREE.Vector3(); viewGun.userData.muzzle.getWorldPosition(mp); spawnSmoke(mp);
+  const mp = new THREE.Vector3(); viewGun.userData.muzzle.getWorldPosition(mp);
+  spawnSmoke(mp); spawnSmoke(mp); spawnSmoke(mp);  // smoke plume out of the barrel
   gunSound();
+  cooldownSound();                                 // ambient cue over the 5s reload
   // raycast for a hit on an animal
   raycaster.setFromCamera({ x: 0, y: 0 }, camera);
   const hits = raycaster.intersectObjects(animalGroup.children, true);
-  if (hits.length) { const root = animalRoot(hits[0].object); if (root) killAnimal(root); }
+  if (hits.length) { const root = animalRoot(hits[0].object); if (root) killAnimal(root, hits[0].point); }
   alertAnimals();
   if (net && net.readyState === 1) net.send(JSON.stringify({ t: "shot" }));
+}
+// low tense drone that fills the 5-second wait between shots
+function cooldownSound() {
+  const ctx = THREE.AudioContext.getContext();
+  if (ctx.state !== "running") return;
+  const t = ctx.currentTime;
+  const osc = ctx.createOscillator(); osc.type = "sine"; osc.frequency.setValueAtTime(70, t); osc.frequency.linearRampToValueAtTime(96, t + 4.8);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.05, t + 0.4);
+  g.gain.setValueAtTime(0.05, t + 4.2); g.gain.linearRampToValueAtTime(0.0, t + 5.0);
+  osc.connect(g).connect(listener.getInput()); osc.start(t); osc.stop(t + 5.05);
 }
 function gunSound() {
   const ctx = THREE.AudioContext.getContext();
@@ -574,21 +635,104 @@ function updateFx(dt) {
 }
 
 // ==================================================================
-//  DAY / NIGHT CYCLE
+//  DAY / NIGHT + WEATHER  (synced from the server so everyone matches)
 // ==================================================================
-let dayT = 0.30; const DAY_LEN = 300;             // seconds for a full day
-const _cNight = new THREE.Color(0x0b0f1a), _cDusk = new THREE.Color(0xcf8a55), _cNoon = new THREE.Color(0xbdc2c0), _cTmp = new THREE.Color();
+let dayT = 0.30; const DAY_LEN = 300;
+let serverDayT = null;
+let fogDens = 0.7, fogTarget = 0.7;      // 0..1 fog thickness
+let rainInt = 0, rainTarget = 0;         // 0..1 rain intensity
+function setWorld(dt_, w) {
+  if (typeof dt_ === "number") serverDayT = dt_;
+  if (w) { fogTarget = w.fog ?? fogTarget; rainTarget = w.kind === "rain" ? 1 : 0; }
+}
+const nightFade = document.getElementById("nightfade");
+const _cNight = new THREE.Color(0x0b0f1a), _cDusk = new THREE.Color(0xcf8a55),
+      _cNoon = new THREE.Color(0xbdc2c0), _cRain = new THREE.Color(0x6b7076), _cTmp = new THREE.Color();
 function updateDay(dt) {
   dayT = (dayT + dt / DAY_LEN) % 1;
+  if (serverDayT != null) { let d = serverDayT - dayT; if (d > 0.5) d -= 1; if (d < -0.5) d += 1; dayT = (dayT + d * Math.min(1, dt * 2) + 1) % 1; }
   const ang = dayT * Math.PI * 2, elev = Math.sin(ang);
   sun.position.set(Math.cos(ang) * 60, elev * 60 + 2, Math.sin(ang * 0.7) * 30);
   const day = Math.max(0, elev);
-  sun.intensity = 0.1 + day * 0.75;
-  hemi.intensity = 0.28 + day * 0.9;
+  sun.intensity = (0.1 + day * 0.75) * (1 - rainInt * 0.5);
+  hemi.intensity = (0.28 + day * 0.9) * (1 - rainInt * 0.3);
   const tt = (elev + 1) / 2;
   if (tt < 0.5) _cTmp.copy(_cNight).lerp(_cDusk, tt / 0.5);
   else _cTmp.copy(_cDusk).lerp(_cNoon, (tt - 0.5) / 0.5);
+  _cTmp.lerp(_cRain, rainInt * 0.5);
   scene.background.copy(_cTmp); scene.fog.color.copy(_cTmp);
+  // fog thickness varies with the weather
+  fogDens += (fogTarget - fogDens) * Math.min(1, dt * 0.5);
+  scene.fog.near = 14 - fogDens * 11;
+  scene.fog.far  = 78 - fogDens * 50;
+  // rain
+  rainInt += (rainTarget - rainInt) * Math.min(1, dt * 0.4);
+  updateRain(dt); updateRainSound();
+  // the screen itself darkens with the sky
+  if (nightFade) nightFade.style.opacity = (Math.max(0, -elev) * 0.6 + rainInt * 0.12).toFixed(3);
+}
+
+// --- rain: line-streak drops that follow the camera + ground splashes ---
+const RAIN_N = 700, RAIN_BOX = 46;
+const rainGeo = new THREE.BufferGeometry();
+const rainPos = new Float32Array(RAIN_N * 6);
+const rainVel = new Float32Array(RAIN_N);
+for (let i = 0; i < RAIN_N; i++) {
+  const x = (Math.random() - 0.5) * RAIN_BOX, y = Math.random() * 30, z = (Math.random() - 0.5) * RAIN_BOX;
+  rainPos[i*6] = x; rainPos[i*6+1] = y; rainPos[i*6+2] = z;
+  rainPos[i*6+3] = x; rainPos[i*6+4] = y - 0.6; rainPos[i*6+5] = z;
+  rainVel[i] = 30 + Math.random() * 20;
+}
+rainGeo.setAttribute("position", new THREE.BufferAttribute(rainPos, 3));
+const rain = new THREE.LineSegments(rainGeo, new THREE.LineBasicMaterial({ color: 0xaab0b8, transparent: true, opacity: 0, fog: true }));
+rain.frustumCulled = false; scene.add(rain);
+const splashes = [];
+function updateRain(dt) {
+  rain.material.opacity = rainInt * 0.5;
+  rain.visible = rainInt > 0.02;
+  if (rain.visible) {
+    const cx = camera.position.x, cz = camera.position.z, cy = camera.position.y;
+    const pos = rainGeo.attributes.position.array;
+    for (let i = 0; i < RAIN_N; i++) {
+      const dy = rainVel[i] * dt;
+      pos[i*6+1] -= dy; pos[i*6+4] -= dy;
+      if (pos[i*6+1] < cy - 6) {
+        const x = cx + (Math.random() - 0.5) * RAIN_BOX, z = cz + (Math.random() - 0.5) * RAIN_BOX, y = cy + 18 + Math.random() * 8;
+        pos[i*6] = x; pos[i*6+1] = y; pos[i*6+2] = z;
+        pos[i*6+3] = x; pos[i*6+4] = y - 0.6; pos[i*6+5] = z;
+      }
+    }
+    rainGeo.attributes.position.needsUpdate = true;
+    if (Math.random() < rainInt * 0.9) spawnSplash(cx + (Math.random() - 0.5) * 20, cz + (Math.random() - 0.5) * 20);
+  }
+  for (let i = splashes.length - 1; i >= 0; i--) {
+    const s = splashes[i]; s.life += dt;
+    s.mesh.scale.setScalar(0.2 + s.life * 3);
+    s.mesh.material.opacity = Math.max(0, 0.5 * (1 - s.life / 0.5));
+    if (s.life > 0.5) { scene.remove(s.mesh); splashes.splice(i, 1); }
+  }
+}
+function spawnSplash(x, z) {
+  const m = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.12, 8),
+    new THREE.MeshBasicMaterial({ color: 0x9fb0c0, transparent: true, opacity: 0.5, fog: true }));
+  m.rotation.x = -Math.PI / 2; m.position.set(x, terrainHeight(x, z) + 0.03, z);
+  scene.add(m); splashes.push({ mesh: m, life: 0 });
+}
+// rain sound (procedural, gated by intensity)
+let rainGain = null;
+function updateRainSound() {
+  if (!audioStarted) return;
+  if (!rainGain) {
+    const ctx = THREE.AudioContext.getContext();
+    const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+    const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 1000;
+    rainGain = ctx.createGain(); rainGain.gain.value = 0;
+    src.connect(hp).connect(rainGain).connect(listener.getInput()); src.start();
+  }
+  rainGain.gain.value = rainInt * 0.12;
 }
 
 // ==================================================================
@@ -623,22 +767,65 @@ function makeWendigo() {                            // tall, dark, skinny figure
   g.userData.legs = legs; return g;
 }
 function spawnAnimals() {
-  for (let i = 0; i < 12; i++) {
-    const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 110, x = Math.cos(a) * r, z = Math.sin(a) * r;
+  for (let i = 0; i < 20; i++) {                    // deer roam the grassland/mid woods
+    const a = rand() * Math.PI * 2, r = 22 + rand() * 120, x = Math.cos(a) * r, z = Math.sin(a) * r;
     const g = makeDeer(); g.position.set(x, terrainHeight(x, z), z); animalGroup.add(g);
-    animals.push({ g, kind: "deer", state: "wander", heading: Math.random() * 6.28, timer: Math.random() * 3, speed: 0, phase: 0 });
+    animals.push({ g, kind: "deer", state: "wander", heading: rand() * 6.28, timer: rand() * 3, speed: 0, phase: 0 });
   }
-  for (let i = 0; i < 3; i++) {
-    const a = Math.random() * Math.PI * 2, r = 150 + Math.random() * 70, x = Math.cos(a) * r, z = Math.sin(a) * r;
+  for (let i = 0; i < 4; i++) {                     // wendigos lurk out in the deep SNOW
+    const a = rand() * Math.PI * 2, r = SNOW_START + 20 + rand() * 90, x = Math.cos(a) * r, z = Math.sin(a) * r;
     const g = makeWendigo(); g.position.set(x, terrainHeight(x, z), z); animalGroup.add(g);
-    animals.push({ g, kind: "wendigo", state: "wander", heading: Math.random() * 6.28, timer: Math.random() * 3, speed: 0, phase: 0 });
+    animals.push({ g, kind: "wendigo", state: "wander", heading: rand() * 6.28, timer: rand() * 3, speed: 0, phase: 0 });
   }
 }
 function animalRoot(obj) { let o = obj; while (o && o.parent !== animalGroup) o = o.parent; return o; }
-function killAnimal(root) {
+function killAnimal(root, point) {
   const idx = animals.findIndex(a => a.g === root); if (idx < 0) return;
-  if (animals[idx].kind === "wendigo") { animals[idx].state = "flee"; animals[idx].timer = 3; return; }
-  animalGroup.remove(root); animals.splice(idx, 1);
+  const a = animals[idx];
+  if (a.kind === "wendigo") { a.state = "flee"; a.timer = 3; return; }   // wendigos don't drop
+  const hp = point || root.position.clone();
+  spawnBlood(hp);
+  bloodPool(root.position.x, root.position.z);
+  // gunshot wound left on the body
+  root.updateMatrixWorld(true);
+  const wound = new THREE.Mesh(new THREE.SphereGeometry(0.11, 5, 4), new THREE.MeshBasicMaterial({ color: 0x4a0808 }));
+  wound.position.copy(root.worldToLocal(hp.clone()));
+  root.add(wound);
+  // becomes a corpse: tips over, freezes, cleaned up after 34s
+  a.dead = true; a.state = "dead"; a.speed = 0; a.corpseTimer = 34;
+  root.rotation.z = Math.PI * 0.48;
+}
+// pixel blood: red flecks that arc out and fall, then a pool that lingers 34s
+const gore = [];
+function spawnBlood(pos) {
+  for (let i = 0; i < 12; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.11, 0.11),
+      new THREE.MeshBasicMaterial({ color: 0x8a0d0d, transparent: true, opacity: 0.95, fog: true, side: THREE.DoubleSide }));
+    m.position.copy(pos);
+    m.userData.vel = new THREE.Vector3((Math.random() - 0.5) * 3, Math.random() * 3 + 1, (Math.random() - 0.5) * 3);
+    scene.add(m); gore.push({ mesh: m, life: 0, ttl: 1.3, grav: true });
+  }
+}
+function bloodPool(x, z) {
+  const m = new THREE.Mesh(new THREE.CircleGeometry(0.12, 12),
+    new THREE.MeshBasicMaterial({ color: 0x5a0a0a, transparent: true, opacity: 0.85, fog: true }));
+  m.rotation.x = -Math.PI / 2; m.position.set(x, terrainHeight(x, z) + 0.04, z);
+  scene.add(m); gore.push({ mesh: m, life: 0, ttl: 34, pool: true });
+}
+function updateGore(dt) {
+  for (let i = gore.length - 1; i >= 0; i--) {
+    const p = gore[i]; p.life += dt;
+    if (p.grav) {
+      p.mesh.userData.vel.y -= 9 * dt;
+      p.mesh.position.addScaledVector(p.mesh.userData.vel, dt);
+      const gh = terrainHeight(p.mesh.position.x, p.mesh.position.z);
+      if (p.mesh.position.y < gh + 0.02) { p.mesh.position.y = gh + 0.02; p.mesh.userData.vel.set(0, 0, 0); }
+      p.mesh.quaternion.copy(camera.quaternion);
+    }
+    if (p.pool) p.mesh.scale.setScalar(1 + Math.min(p.life, 3) * 2.5);   // spreads, then holds
+    if (p.life > p.ttl - 2) p.mesh.material.opacity = Math.max(0, (p.pool ? 0.85 : 0.95) * (p.ttl - p.life) / 2);
+    if (p.life > p.ttl) { scene.remove(p.mesh); gore.splice(i, 1); }
+  }
 }
 function alertAnimals() {
   for (const a of animals) {
@@ -655,7 +842,9 @@ function canSee(a) {
   return Math.abs(wrapAngle(Math.atan2(dz, dx) - a.heading)) < 1.1;   // ~63° half-cone of sight
 }
 function updateAnimals(dt) {
-  for (const a of animals) {
+  for (let ai = animals.length - 1; ai >= 0; ai--) {
+    const a = animals[ai];
+    if (a.dead) { a.corpseTimer -= dt; if (a.corpseTimer <= 0) { animalGroup.remove(a.g); animals.splice(ai, 1); } continue; }
     a.timer -= dt;
     if (a.state !== "flee" && canSee(a)) {
       if (a.kind === "deer") { a.state = "flee"; a.timer = 3 + Math.random() * 2; a.heading = Math.atan2(a.g.position.z - playerPos.z, a.g.position.x - playerPos.x); }

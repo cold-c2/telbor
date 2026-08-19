@@ -31,6 +31,7 @@ function createWindow() {
     backgroundColor: "#060606",
     autoHideMenuBar: true,
     title: "PALE FIELD",
+    icon: path.join(__dirname, "build", "icon.ico"),
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
   win.setMenuBarVisibility(false);

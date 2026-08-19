@@ -66,6 +66,24 @@ function broadcast(obj, exceptId) {
   }
 }
 
+// ---- shared world: time of day + weather (server owns these so everyone matches) ----
+const DAY_LEN = 300;                       // seconds per full day
+let dayT = 0.30;
+let weather = { kind: "fog", fog: 0.7 };   // kind: clear|fog|rain ; fog: 0..1 density
+let weatherTimer = 30;
+setInterval(() => {
+  dayT = (dayT + 1 / DAY_LEN) % 1;
+  weatherTimer -= 1;
+  if (weatherTimer <= 0) {
+    const r = Math.random();
+    if (r < 0.45) weather = { kind: "fog",   fog: 0.55 + Math.random() * 0.4 };
+    else if (r < 0.75) weather = { kind: "clear", fog: 0.15 + Math.random() * 0.2 };
+    else weather = { kind: "rain", fog: 0.5 + Math.random() * 0.35 };
+    weatherTimer = 45 + Math.random() * 75;
+  }
+  broadcast({ t: "world", dayT, weather });
+}, 1000);
+
 wss.on("connection", (ws) => {
   const id = nextId++;
   const state = { x: 0, y: 0, z: 0, ry: 0, hy: 0, ph: 0, cr: 0, fy: 0, name: "wanderer" };
@@ -73,7 +91,7 @@ wss.on("connection", (ws) => {
 
   const others = [];
   for (const [oid, p] of players) if (oid !== id) others.push({ id: oid, ...p.state });
-  ws.send(JSON.stringify({ t: "welcome", id, others }));
+  ws.send(JSON.stringify({ t: "welcome", id, others, dayT, weather }));
   broadcast({ t: "join", id, ...state }, id);
 
   ws.on("message", (data) => {
