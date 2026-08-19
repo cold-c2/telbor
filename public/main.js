@@ -2,11 +2,10 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 // ------------------------------------------------------------------ config
-const PIXEL_HEIGHT = 300;        // internal vertical resolution; width is derived from the
-                                 // window aspect so pixels stay square and nothing stretches.
-                                 // Lower = chunkier pixels. Raise toward 480 for a crisper look.
+const PIXEL_HEIGHT = 380;        // internal vertical resolution (PS2-ish — crisper than PS1's ~240,
+                                 // still pixelated via nearest-neighbor upscale). aspect-derived width.
 const FOG_COLOR  = 0xbdc2c0;     // pale desaturated grey-green haze
-const SNAP_GRID  = 130.0;        // PS1 vertex-snap resolution (lower = jitterier)
+const SNAP_GRID  = 200.0;        // vertex-snap resolution (higher = steadier verts, more PS2 than PS1)
 
 // deterministic world: a fixed seed means EVERY player generates the exact same land
 function mulberry32(a) {
@@ -228,6 +227,22 @@ for (let i = 0; i < 900; i++) {
   scene.add(glyphs);
 }
 
+// ------------------------------------------------------------------ blob contact shadows (cheap grounding)
+function blobTexture() {
+  const c = document.createElement("canvas"); c.width = c.height = 32;
+  const g = c.getContext("2d");
+  const grd = g.createRadialGradient(16, 16, 1, 16, 16, 15);
+  grd.addColorStop(0, "rgba(0,0,0,0.5)"); grd.addColorStop(1, "rgba(0,0,0,0)");
+  g.fillStyle = grd; g.fillRect(0, 0, 32, 32);
+  return new THREE.CanvasTexture(c);
+}
+const _blobTex = blobTexture();
+function makeBlobShadow(radius) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(radius * 2, radius * 2),
+    new THREE.MeshBasicMaterial({ map: _blobTex, transparent: true, depthWrite: false, fog: true }));
+  m.rotation.x = -Math.PI / 2; m.position.y = 0.04; return m;
+}
+
 // ------------------------------------------------------------------ rifle (held model + first-person viewmodel)
 function makeRifle() {
   const g = new THREE.Group();
@@ -252,9 +267,10 @@ function makeRifle() {
 }
 
 // ------------------------------------------------------------------ pale figure (the player avatar)
+const paleTex = noiseTexture([222, 222, 224], 22, 16);   // faint cloth grain (PS2-ish surface)
 function makePaleFigure() {
   const g = new THREE.Group();       // origin is at the feet (y=0)
-  const mat = ps1Material({ color: 0xededed });
+  const mat = ps1Material({ map: paleTex });
   const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.8, 0.3), mat); torso.position.y = 1.15; g.add(torso);
   const head  = new THREE.Group(); head.position.set(0, 1.55, 0); g.add(head);   // neck pivot
   head.add(new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.4, 0.36), mat).translateY(0.23));
@@ -272,18 +288,21 @@ function makePaleFigure() {
   gunPivot.position.set(0, 1.35, 0); gunPivot.rotation.order = "YXZ";
   g.add(gunPivot);
   const rifle = makeRifle();
-  rifle.position.set(0.12, -0.02, -0.3);         // in the hands, slightly right of center
+  rifle.position.set(0.16, -0.05, -0.62);        // held out in front so the stock clears the torso
   gunPivot.add(rifle);
   // arms reach FORWARD onto the gun (+x pitches forward; ±y converges the hands on it)
   armL.rotation.order = armR.rotation.order = "YXZ";
   armL.rotation.set(1.45, -0.28, 0);             // left hand out on the fore-stock
   armR.rotation.set(1.15,  0.28, 0);             // right hand back at the grip
+  g.add(makeBlobShadow(0.5));
   g.userData.limbs = { armL, armR, legL, legR, head };
   g.userData.rifle = rifle;
   g.userData.gunPivot = gunPivot;
   g.userData.crouch = 0;
   return g;
 }
+// the local avatar is hidden, so its shadow needs to live on its own
+const playerShadow = makeBlobShadow(0.5); scene.add(playerShadow);
 
 const player = makePaleFigure();
 player.visible = false;   // first person: hide our own body so the camera never sits inside it
@@ -488,7 +507,10 @@ function frame(now) {
     playerPos.x = nx; playerPos.z = nz;
     // walking: body turns to face where you're looking
     bodyYaw = turnToward(bodyYaw, headYaw, dt * 10);
+    const beforePhase = walkPhase;
     walkPhase += dt * (run ? 13 : 8);
+    if (!crouching && Math.floor(walkPhase / Math.PI) !== Math.floor(beforePhase / Math.PI))
+      footstep(run, snowAmount(playerPos.x, playerPos.z) > 0.4);   // one step per half-cycle
   } else {
     // standing still: free-look — head leads, body only follows past HEAD_LIMIT
     const off = wrapAngle(headYaw - bodyYaw);
@@ -504,6 +526,7 @@ function frame(now) {
 
   // keep the (hidden) avatar synced for networking; drive its walk cycle
   const gy = groundHeight(playerPos.x, playerPos.z);
+  playerShadow.position.set(playerPos.x, gy + 0.05, playerPos.z);
   player.position.set(playerPos.x, gy, playerPos.z);
   player.rotation.y = bodyYaw;
   player.userData.limbs.head.rotation.y = wrapAngle(headYaw - bodyYaw);
@@ -655,6 +678,21 @@ function gunSound() {
   osc.connect(og).connect(listener.getInput()); osc.start(t); osc.stop(t + 0.14);
 }
 
+// footstep: a short filtered noise thud; muffled crunch on snow, softer thud on grass
+function footstep(running, snowy) {
+  const ctx = THREE.AudioContext.getContext();
+  if (ctx.state !== "running") return;
+  const t = ctx.currentTime, dur = snowy ? 0.13 : 0.09;
+  const buf = ctx.createBuffer(1, (ctx.sampleRate * dur) | 0, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, snowy ? 1.5 : 3);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const f = ctx.createBiquadFilter();
+  if (snowy) { f.type = "highpass"; f.frequency.value = 1500; } else { f.type = "lowpass"; f.frequency.value = 380; }
+  const g = ctx.createGain(); g.gain.value = running ? 0.16 : 0.09;
+  src.connect(f).connect(g).connect(listener.getInput()); src.start(t);
+}
+
 // muzzle smoke puffs (billboarded, expand + fade)
 const fx = [];
 function spawnSmoke(pos) {
@@ -791,6 +829,7 @@ function makeDeer() {
   for (const [lx, lz] of [[-0.18, -0.5], [0.18, -0.5], [-0.18, 0.5], [0.18, 0.5]]) {
     const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.0, 0.12), hide); leg.position.set(lx, 0.5, lz); g.add(leg); legs.push(leg);
   }
+  g.add(makeBlobShadow(0.85));
   g.userData.legs = legs; return g;
 }
 function makeWendigo() {                            // tall, dark, skinny figure
@@ -805,6 +844,7 @@ function makeWendigo() {                            // tall, dark, skinny figure
     const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.5, 0.12), dark); arm.position.set(s * 0.32, 2.1, 0); g.add(arm);
     const leg = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.6, 0.14), dark); leg.position.set(s * 0.14, 0.8, 0); g.add(leg); legs.push(leg);
   }
+  g.add(makeBlobShadow(0.55));
   g.userData.legs = legs; return g;
 }
 function animalRoot(obj) { let o = obj; while (o && o.parent !== animalGroup) o = o.parent; return o; }
