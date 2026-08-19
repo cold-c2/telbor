@@ -86,10 +86,25 @@ function noiseTexture(base, spread, size = 32) {
 
 // ------------------------------------------------------------------ terrain height + biome
 // ONE shared height field, used by both the mesh and the analytic ground-follow.
-function terrainHeight(x, z) {
-  return Math.sin(x * 0.018) * 3.2 + Math.cos(z * 0.021) * 3.0   // big rolling hills
-       + Math.sin(x * 0.05) * 0.8 + Math.cos(z * 0.06) * 0.7      // medium bumps
-       + Math.sin((x + z) * 0.11) * 0.4;                          // fine ripple
+function terrainHeight(x, z) {   // MUST stay identical to server.js terrainHeight (animals stand on it)
+  const big  = Math.sin(x * 0.018) * 4.2 + Math.cos(z * 0.021) * 4.0;                     // big rolling hills
+  const ridge = (1.0 - Math.abs(Math.sin(x * 0.032 + Math.cos(z * 0.028) * 1.3))) * 3.6;  // ridged crests (hilly + shaded valleys)
+  const med  = Math.sin(x * 0.05) * 0.9 + Math.cos(z * 0.06) * 0.8;                       // medium bumps
+  const fine = Math.sin((x + z) * 0.11) * 0.4;                                            // fine ripple
+  return big + ridge + med + fine;
+}
+// low-frequency, seeded forest-density field: some regions are dense woods, others open plains
+function fbm2(x, z) {
+  let v = 0, amp = 0.5, fx = x, fz = z;
+  for (let o = 0; o < 3; o++) {
+    v += amp * (Math.sin(fx) * Math.cos(fz * 1.13 + 1.7) + Math.sin((fx + fz) * 0.7));
+    fx *= 2.03; fz *= 1.97; amp *= 0.5;
+  }
+  return v;
+}
+function forestDensity(x, z) {   // 0 (plains/clearing) .. 1 (super-dense forest)
+  const n = fbm2(x * 0.0055 + 11.2, z * 0.0055 - 4.8);
+  return Math.max(0, Math.min(1, 0.5 + n * 0.55));
 }
 const SNOW_START = 150, SNOW_FULL = 235;
 function snowAmount(x, z) { const r = Math.hypot(x, z); return Math.max(0, Math.min(1, (r - SNOW_START) / (SNOW_FULL - SNOW_START))); }
@@ -112,6 +127,7 @@ ground.rotation.x = -Math.PI / 2;
     const wx = lx, wz = -ly;                          // plane local -> world (rotation.x = -90°)
     pos.setZ(i, terrainHeight(wx, wz));
     tmpc.copy(grass).lerp(snow, snowAmount(wx, wz));
+    tmpc.multiplyScalar(1 - forestDensity(wx, wz) * 0.28);   // dense canopy shades the forest floor
     col[i * 3] = tmpc.r; col[i * 3 + 1] = tmpc.g; col[i * 3 + 2] = tmpc.b;
   }
   ground.geometry.setAttribute("color", new THREE.BufferAttribute(col, 3));
@@ -173,18 +189,65 @@ function addTree(px, pz, kind, s) {
   else { t = makePine(); if (snowy) t.traverse(o => { if (o.isMesh && o.geometry.type === "ConeGeometry") o.material = snowPineMat; }); }
   t.position.set(px, terrainHeight(px, pz), pz);
   t.scale.setScalar(s); t.rotation.y = rand() * Math.PI;
+  const col = { x: px, z: pz, r: 0.3 * s };          // thin trunks: you can walk between & under
+  colliders.push(col);
+  t.userData.chop = { hp: 5, wood: 2 + Math.round(s), col };   // axe target: yields wood
   forest.add(t);
-  colliders.push({ x: px, z: pz, r: 0.3 * s });     // thin trunks: you can walk between & under
 }
-// area-uniform scatter (r = sqrt) so the whole map — including the far SNOW — stays densely wooded
-for (let i = 0; i < 900; i++) {
+// density-driven scatter: dense forest in high-forestDensity regions, real clearings in the plains
+for (let i = 0; i < 1500; i++) {
   const a = rand() * Math.PI * 2, r = 8 + Math.sqrt(rand()) * 330;
   const px = Math.cos(a) * r, pz = Math.sin(a) * r;
+  const dens = forestDensity(px, pz);
+  if (rand() > dens * dens) continue;              // clearings stay open (plains); dense zones fill in
   const snowy = snowAmount(px, pz) > 0.4;
   const roll = rand();
   const kind = snowy ? (roll < 0.9 ? "tall" : "pine")
                      : (roll < 0.4 ? "tall" : roll < 0.65 ? "birch" : "pine");
   addTree(px, pz, kind, 0.85 + rand() * 1.1);
+}
+
+// ------------------------------------------------------------------ rocks & boulders (clustered on hillsides)
+const rockMat0 = ps1Material({ map: noiseTexture([112, 110, 104], 38) });
+const rocks = new THREE.Group(); scene.add(rocks);
+function makeRock(big) {
+  const geo = big ? new THREE.IcosahedronGeometry(1.6, 0) : new THREE.DodecahedronGeometry(0.7, 0);
+  return new THREE.Mesh(geo, rockMat0);
+}
+for (let i = 0; i < 220; i++) {
+  const a = rand() * Math.PI * 2, r = 14 + Math.sqrt(rand()) * 330;
+  const px = Math.cos(a) * r, pz = Math.sin(a) * r;
+  const big = rand() < 0.35, s = (big ? 0.8 : 0.6) + rand() * 1.1;
+  const rk = makeRock(big); rk.scale.setScalar(s);
+  rk.position.set(px, terrainHeight(px, pz) + (big ? 0.4 : 0.15) * s, pz);
+  rk.rotation.set(rand() * 3, rand() * 6, rand() * 3);
+  rocks.add(rk);
+  colliders.push({ x: px, z: pz, r: (big ? 1.5 : 0.6) * s });
+}
+
+// ------------------------------------------------------------------ cave mouths (boulder ring around a dark, shaded recess)
+const caves = new THREE.Group(); scene.add(caves);
+function makeCave() {
+  const g = new THREE.Group();
+  const darkMat = new THREE.MeshBasicMaterial({ color: 0x090b0c, fog: true, side: THREE.DoubleSide });
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(6, 4), darkMat); back.position.set(0, 2, -2.4); g.add(back);
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(7, 1.4, 5), rockMat0); roof.position.set(0, 4.2, -0.6); roof.rotation.x = -0.12; g.add(roof);
+  for (let k = 0; k < 9; k++) {                 // a rough ring of boulders framing the entrance
+    const ang = Math.PI * (0.15 + 0.7 * (k / 8)), rr = 3.2;
+    const b = makeRock(true); const s = 0.9 + rand() * 0.8; b.scale.setScalar(s);
+    b.position.set(Math.cos(ang) * rr, 0.6 + rand(), -Math.sin(ang) * rr * 0.8 - 0.4);
+    b.rotation.set(rand() * 3, rand() * 6, rand() * 3); g.add(b);
+  }
+  return g;
+}
+for (let i = 0; i < 5; i++) {
+  const a = rand() * Math.PI * 2, r = 60 + rand() * 240;
+  const px = Math.cos(a) * r, pz = Math.sin(a) * r;
+  const cave = makeCave();
+  cave.position.set(px, terrainHeight(px, pz), pz);
+  cave.rotation.y = rand() * Math.PI * 2;
+  caves.add(cave);
+  colliders.push({ x: px, z: pz - 2.4, r: 3.0 });   // solid back wall; the mouth stays walk-in-able
 }
 
 // ------------------------------------------------------------------ the stone hut with the screaming mouth
@@ -266,6 +329,21 @@ function makeRifle() {
   return g;
 }
 
+// ------------------------------------------------------------------ axe (held model + first-person viewmodel)
+function makeAxe() {
+  const g = new THREE.Group();
+  const wood  = ps1Material({ color: 0x6b4a2c });
+  const metal = ps1Material({ color: 0x9297a0 });
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.042, 0.95, 6), wood);
+  handle.rotation.x = Math.PI / 2; handle.position.set(0, 0, -0.18); g.add(handle);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.17, 0.05), metal); head.position.set(0.0, 0.07, -0.6); g.add(head);
+  const blade = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.16, 3), metal);
+  blade.rotation.z = -Math.PI / 2; blade.position.set(0.16, 0.07, -0.6); g.add(blade);
+  const edge = new THREE.Object3D(); edge.position.set(0.18, 0.07, -0.6); g.add(edge);
+  g.userData.edge = edge;
+  return g;
+}
+
 // ------------------------------------------------------------------ pale figure (the player avatar)
 const paleTex = noiseTexture([222, 222, 224], 22, 16);   // faint cloth grain (PS2-ish surface)
 function makePaleFigure() {
@@ -294,10 +372,15 @@ function makePaleFigure() {
   armL.rotation.order = armR.rotation.order = "YXZ";
   armL.rotation.set(1.45, -0.28, 0);             // left hand out on the fore-stock
   armR.rotation.set(1.15,  0.28, 0);             // right hand back at the grip
+  // a small axe held in the right hand, shown whenever the rifle is stowed (default carry)
+  const heldAxe = makeAxe(); heldAxe.scale.setScalar(0.7);
+  heldAxe.position.set(0, -0.7, 0.05); heldAxe.rotation.set(-1.2, 0, 0);
+  armR.add(heldAxe); heldAxe.visible = false;
   g.add(makeBlobShadow(0.5));
   g.userData.limbs = { armL, armR, legL, legR, head };
   g.userData.rifle = rifle;
   g.userData.gunPivot = gunPivot;
+  g.userData.heldAxe = heldAxe;
   g.userData.crouch = 0;
   return g;
 }
@@ -342,14 +425,29 @@ document.addEventListener("mousemove", e => {
   headYaw -= e.movementX * sens;
   pitch    = Math.max(-1.3, Math.min(1.3, pitch - e.movementY * sens));
 });
-// equip / unequip the rifle, and hold right-click to aim down the U-sight
+// hotbar + action keys — every mouse control has a keyboard mirror (see the binds panel / BINDINGS)
+let rmbAim = false;
 addEventListener("keydown", (e) => {
-  if (editing) return;
-  if (e.code === "Digit1") equipGun(true);
-  else if (e.code === "Digit2") equipGun(false);
+  if (e.code === "KeyK") { e.preventDefault(); toggleBinds(); return; }        // binds panel
+  if (e.code === "Tab")  { e.preventDefault(); toggleCraft(); return; }        // crafting / inventory
+  if (menuOpen) { if (e.code === "Escape") closeMenus(); return; }             // menus swallow the rest
+  if (editing) return;                                                          // editor has its own keys
+  if (e.repeat) return;
+  switch (e.code) {
+    case "Digit1": setItem("axe");   break;
+    case "Digit2": setItem("rifle"); break;
+    case "Digit3": setItem("build"); break;
+    case "KeyH":   setItem("none");  break;
+    case "KeyC":   crouchToggle = !crouchToggle; break;                        // C toggles crouch (Ctrl still holds)
+    case "KeyF":   primaryAction(); break;                                     // mirror of left-click
+    case "KeyE":   interact();      break;                                     // pick up / eat / light fire / remove
+    case "KeyR":   if (activeItem === "build") buildRot += Math.PI / 2; break; // rotate build ghost
+    case "BracketLeft":  if (activeItem === "build") cyclePiece(-1); break;
+    case "BracketRight": if (activeItem === "build") cyclePiece(1);  break;
+  }
 });
-addEventListener("mousedown", (e) => { if (e.button === 2 && locked && !editing) aiming = true; });
-addEventListener("mouseup",   (e) => { if (e.button === 2) aiming = false; });
+addEventListener("mousedown", (e) => { if (e.button === 2 && locked && !editing) rmbAim = true; });   // hold RMB / Q to aim
+addEventListener("mouseup",   (e) => { if (e.button === 2) rmbAim = false; });
 addEventListener("contextmenu", (e) => e.preventDefault());
 
 // ------------------------------------------------------------------ multiplayer
@@ -361,9 +459,11 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.t === "welcome") {
       myId = m.id;
-      for (const o of m.others) spawnRemote(o.id, o);
+      if (m.spawn) { spawnPoint.x = m.spawn.x; spawnPoint.z = m.spawn.z; }
+      for (const o of m.others) { spawnRemote(o.id, o); if (o.dead) killRemote(remote.get(o.id)); }
       setWorld(m.dayT, m.weather);
       if (m.animals) applyAnimals(m.animals);
+      if (m.builds) for (const b of m.builds) addBuild(b);
     } else if (m.t === "world") {
       setWorld(m.dayT, m.weather);
     } else if (m.t === "animals") {
@@ -376,7 +476,19 @@ function connect() {
       const f = remote.get(m.id);
       if (f) f.userData.target = { x: m.x, z: m.z, ry: m.ry, hy: m.hy || 0, ph: m.ph || 0, cr: m.cr || 0, fy: m.fy || 0, am: m.am || 0, eq: m.eq ?? 1 };
     } else if (m.t === "shot") {
-      const f = remote.get(m.id); if (f) flashMuzzle(f);
+      const f = remote.get(m.id); if (f) { flashMuzzle(f); f.userData.recoil = 0.16; }   // remote muzzle climbs too
+    } else if (m.t === "swing") {
+      const f = remote.get(m.id); if (f) f.userData.swing = 1;                             // remote axe arc
+    } else if (m.t === "hp") {
+      if (m.id === myId) setLocalHp(m.hp); else { const f = remote.get(m.id); if (f) f.userData.hp = m.hp; }
+    } else if (m.t === "died") {
+      if (m.id === myId) onLocalDeath(m.cause); else killRemote(remote.get(m.id));
+    } else if (m.t === "respawn") {
+      if (m.id === myId) onLocalRespawn(m.x, m.z, m.hp); else reviveRemote(remote.get(m.id), m.x, m.z);
+    } else if (m.t === "build") {
+      addBuild(m.b);
+    } else if (m.t === "unbuild") {
+      removeBuild(m.id);
     } else if (m.t === "leave") {
       const f = remote.get(m.id); if (f) { scene.remove(f); remote.delete(m.id); }
     }
@@ -392,7 +504,22 @@ function spawnRemote(id, s) {
   f.rotation.y = s.ry || 0;
   f.userData.target = { x, z, ry: s.ry || 0, hy: s.hy || 0, ph: 0, cr: 0, fy: 0 };
   f.userData.wphase = 0; f.userData.px = x; f.userData.pz = z; f.userData.crv = 0;
+  f.userData.netId = id; f.userData.hp = s.hp ?? 100; f.userData.recoil = 0; f.userData.swing = 0; f.userData.deadState = 0;
   scene.add(f); remote.set(id, f);
+}
+function remoteRoot(obj) { let o = obj; while (o) { if (o.userData && o.userData.netId != null) return o; o = o.parent; } return null; }
+// remote player death: tip the body over + pool blood at the feet (reuses the animal corpse trick)
+function killRemote(f) {
+  if (!f || f.userData.deadState) return;
+  f.userData.deadState = 1; f.rotation.z = Math.PI * 0.5;
+  bloodPool(f.position.x, f.position.z);
+  spawnBlood(new THREE.Vector3(f.position.x, f.position.y + 1.0, f.position.z));
+}
+function reviveRemote(f, x, z) {
+  if (!f) return;
+  f.userData.deadState = 0; f.rotation.z = 0;
+  f.position.set(x, groundHeight(x, z), z);
+  f.userData.target = { x, z, ry: 0, hy: 0, ph: 0, cr: 0, fy: 0, eq: 1 };
 }
 function updateCount() {
   document.getElementById("count").textContent = `wanderers online: ${remote.size + 1}`;
@@ -479,15 +606,28 @@ function frame(now) {
 
   updateDay(dt); updateFx(dt); updateGore(dt); updateNetAnimals(dt);
 
+  // --- keyboard look (a full mirror of the mouse) ---
+  if (!menuOpen && !dead) {
+    const kl = 1.9;
+    if (keys["ArrowLeft"])  headYaw += kl * dt;
+    if (keys["ArrowRight"]) headYaw -= kl * dt;
+    if (keys["ArrowUp"])    pitch = Math.min(1.3, pitch + kl * dt);
+    if (keys["ArrowDown"])  pitch = Math.max(-1.3, pitch - kl * dt);
+  }
+  aiming = (rmbAim || keys["KeyQ"]) && activeItem === "rifle" && !menuOpen && !dead;
+
   // --- input (movement is relative to where you're LOOKING) ---
-  crouching = (keys["ControlLeft"] || keys["ControlRight"]) && !editing;
-  const run = (keys["ShiftLeft"] || keys["ShiftRight"]) && !crouching;
+  const menuBlock = menuOpen || dead;
+  crouching = ((keys["ControlLeft"] || keys["ControlRight"]) || crouchToggle) && !editing && !dead;
+  const run = !menuBlock && (keys["ShiftLeft"] || keys["ShiftRight"]) && !crouching;
   const speed = run ? 6.2 : crouching ? 1.6 : 3.1;
   let fwd = 0, str = 0;
-  if (keys["KeyW"]) fwd += 1;
-  if (keys["KeyS"]) fwd -= 1;
-  if (keys["KeyD"]) str += 1;
-  if (keys["KeyA"]) str -= 1;
+  if (!menuBlock) {
+    if (keys["KeyW"]) fwd += 1;
+    if (keys["KeyS"]) fwd -= 1;
+    if (keys["KeyD"]) str += 1;
+    if (keys["KeyA"]) str -= 1;
+  }
   const moving = fwd || str;
 
   const sinY = Math.sin(headYaw), cosY = Math.cos(headYaw);
@@ -537,34 +677,44 @@ function frame(now) {
   curEye += (targetEye - curEye) * Math.min(1, dt * 12);
   camera.position.set(playerPos.x, gy + curEye + editorAlt, playerPos.z);
   camera.rotation.y = headYaw;
-  camera.rotation.x = pitch;
+  recoilPitch += (0 - recoilPitch) * Math.min(1, dt * 5);   // recoil kick settles back down
+  camera.rotation.x = pitch + recoilPitch;
 
   updateViewGun(dt, moving && !crouching);
+  updateSurvival(dt, run, moving);
   if (editing) editorTick();
 
   // --- remote figures: interpolate, stand on the ground, animate their gait ---
   for (const f of remote.values()) {
     const t = f.userData.target; if (!t) continue;
+    f.userData.recoil = Math.max(0, f.userData.recoil - dt * 4);   // recoil / swing impulses decay
+    f.userData.swing  = Math.max(0, f.userData.swing  - dt * 3);
     f.position.x += (t.x - f.position.x) * Math.min(1, dt * 10);
     f.position.z += (t.z - f.position.z) * Math.min(1, dt * 10);
     f.position.y = groundHeight(f.position.x, f.position.z) + (t.fy || 0);   // + fly height
+    if (f.userData.deadState) continue;                                       // stay fallen; no rig/gait
     f.rotation.y += wrapAngle(t.ry - f.rotation.y) * Math.min(1, dt * 10);
     f.userData.limbs.head.rotation.y = wrapAngle((t.hy ?? t.ry) - f.rotation.y);
     f.userData.limbs.head.rotation.x = t.ph || 0;                            // look up/down
     f.userData.crv += ((t.cr ? 1 : 0) - f.userData.crv) * Math.min(1, dt * 10);
     f.scale.y = 1 - 0.32 * f.userData.crv;                                   // crouch
+    const L2 = f.userData.limbs;
+    if (f.userData.heldAxe) f.userData.heldAxe.visible = !t.eq;              // axe shows when the rifle is away
     // gun rig + arms track where they're looking; raised slightly on ADS; hidden when unequipped
     const rig = f.userData.gunPivot;
     if (rig) {
       const lookOff = wrapAngle((t.hy ?? t.ry) - f.rotation.y);
       rig.visible = !!t.eq;
       rig.rotation.y = lookOff;
-      rig.rotation.x = t.ph || 0;
+      rig.rotation.x = (t.ph || 0) + f.userData.recoil;                      // muzzle climbs on recoil
       rig.position.y = 1.35 + (t.am ? 0.08 : 0);
-      const L2 = f.userData.limbs, up = (t.ph || 0) * 0.6;
+      const up = (t.ph || 0) * 0.6;
       if (t.eq) {
         L2.armL.rotation.set(1.45 + up, lookOff - 0.28, 0);
         L2.armR.rotation.set(1.15 + up, lookOff + 0.28, 0);
+      } else if (f.userData.swing > 0) {                                     // axe chop arc on the right arm
+        const sw = Math.sin((1 - f.userData.swing) * Math.PI);
+        L2.armL.rotation.set(0.4, 0, 0); L2.armR.rotation.set(-1.8 + sw * 2.6, 0, 0);
       } else {
         L2.armL.rotation.set(0, 0, 0); L2.armR.rotation.set(0, 0, 0);
       }
@@ -599,31 +749,46 @@ function frame(now) {
 // ==================================================================
 const viewGun = makeRifle(); viewGun.scale.setScalar(0.85);
 camera.add(viewGun);
-let viewRecoil = 0, viewBob = 0, lastFire = 0;
-let equipped = true, aiming = false, aimT = 0;
+let viewRecoil = 0, viewBob = 0, lastFire = 0, recoilPitch = 0;
+let equipped = true, aiming = false, aimT = 0;   // equipped mirrors (activeItem === "rifle"), kept in sync each frame
 const FIRE_COOLDOWN = 5000;                       // 5 seconds between shots
 const HIP = new THREE.Vector3(0.24, -0.2, -0.5);
 const ADS = new THREE.Vector3(0.0, -0.05, -0.34);  // lines the U-sight up with screen center
 
+// ---- first-person AXE viewmodel + swing ----
+const viewAxe = makeAxe(); viewAxe.scale.setScalar(0.85);
+viewAxe.position.set(0.28, -0.28, -0.45); viewAxe.rotation.set(0.2, -0.3, 0);
+camera.add(viewAxe); viewAxe.visible = false;
+let axeSwing = 0, lastSwing = 0;
+function updateViewAxe(dt) {
+  axeSwing = Math.max(0, axeSwing - dt * 3.5);
+  viewAxe.visible = activeItem === "axe" && !editing && !dead;
+  const s = Math.sin((1 - axeSwing) * Math.PI);      // 0..1..0 chop arc
+  viewAxe.rotation.x = 0.2 + s * 1.5;                // swings down and back
+  viewAxe.position.z = -0.45 - s * 0.12;
+}
+
 function updateViewGun(dt, walking) {
+  equipped = activeItem === "rifle";                 // "equipped" now means the rifle is the active item
+  updateViewAxe(dt);
   viewRecoil = Math.max(0, viewRecoil - dt * 6);
   aimT += ((aiming && equipped ? 1 : 0) - aimT) * Math.min(1, dt * 12);
   const canBob = walking && aimT < 0.5;
   viewBob += dt * (canBob ? 9 : 0);
   const bob = canBob ? Math.sin(viewBob) * 0.012 : 0;
   const px = HIP.x + (ADS.x - HIP.x) * aimT;
-  const py = HIP.y + (ADS.y - HIP.y) * aimT + bob - viewRecoil * 0.04;
+  const py = HIP.y + (ADS.y - HIP.y) * aimT + bob + viewRecoil * 0.03;   // muzzle RISES on recoil
   const pz = HIP.z + (ADS.z - HIP.z) * aimT + viewRecoil * 0.06;
   viewGun.position.set(px, py, pz);
   viewGun.scale.setScalar(0.85 - aimT * 0.3);      // shrinks toward the eye on ADS so the stock never crosses the near plane
-  viewGun.rotation.x = -viewRecoil * 0.3;
-  viewGun.visible = equipped && !editing;
+  viewGun.rotation.x = viewRecoil * 0.28;          // barrel kicks UP
+  viewGun.visible = equipped && !editing && !dead;
   const fov = 68 - aimT * 16;                      // slight zoom when aiming
   if (Math.abs(camera.fov - fov) > 0.05) { camera.fov = fov; camera.updateProjectionMatrix(); }
-  // center dot when hip-carrying the gun (the U-sight takes over when aiming)
-  document.getElementById("crosshair").classList.toggle("on", (equipped && !editing && aimT < 0.5) || editing);
+  // center dot: when hip-carrying gun, when holding axe/build, or in the editor (U-sight takes over on ADS)
+  const showDot = !dead && !menuOpen && ((equipped && aimT < 0.5) || activeItem === "axe" || activeItem === "build");
+  document.getElementById("crosshair").classList.toggle("on", showDot || editing);
 }
-function equipGun(on) { equipped = on; if (!on) aiming = false; }
 function showFlash(rifle) {
   const fl = rifle.userData.flash; if (!fl) return;
   fl.visible = true; fl.rotation.z = Math.random() * Math.PI;
@@ -639,16 +804,23 @@ function fire() {
   const now = performance.now();
   if (now - lastFire < FIRE_COOLDOWN) return;      // 5-second bolt cycle
   lastFire = now; viewRecoil = 1;
+  recoilPitch = 0.16;                              // kicks the CAMERA up (recovers over the next moment)
   showFlash(viewGun);
   const mp = new THREE.Vector3(); viewGun.userData.muzzle.getWorldPosition(mp);
   spawnSmoke(mp); spawnSmoke(mp); spawnSmoke(mp);  // smoke plume out of the barrel
   gunSound();
   cooldownSound();                                 // ambient cue over the 5s reload
-  // raycast for a hit on an animal
+  // raycast down the crosshair: nearest of animal / player wins
   raycaster.setFromCamera({ x: 0, y: 0 }, camera);
-  const hits = raycaster.intersectObjects(animalGroup.children, true);
-  if (hits.length) { const root = animalRoot(hits[0].object); if (root && root.userData.aid != null && net && net.readyState === 1) net.send(JSON.stringify({ t: "hit", id: root.userData.aid })); }
-  if (net && net.readyState === 1) net.send(JSON.stringify({ t: "shot" }));
+  const aHits = raycaster.intersectObjects(animalGroup.children, true);
+  const pHits = raycaster.intersectObjects([...remote.values()], true);
+  const aD = aHits.length ? aHits[0].distance : Infinity;
+  const pD = pHits.length ? pHits[0].distance : Infinity;
+  if (net && net.readyState === 1) {
+    if (pD < aD) { const f = remoteRoot(pHits[0].object); if (f && f.userData.netId != null) net.send(JSON.stringify({ t: "phit", id: f.userData.netId })); }
+    else if (aHits.length) { const root = animalRoot(aHits[0].object); if (root && root.userData.aid != null) net.send(JSON.stringify({ t: "hit", id: root.userData.aid })); }
+    net.send(JSON.stringify({ t: "shot" }));
+  }
 }
 // low tense drone that fills the 5-second wait between shots
 function cooldownSound() {
@@ -717,7 +889,7 @@ function updateFx(dt) {
 // ==================================================================
 let dayT = 0.30; const DAY_LEN = 300;
 let serverDayT = null;
-let fogDens = 0.7, fogTarget = 0.7;      // 0..1 fog thickness
+let fogDens = 0.15, fogTarget = 0.15;    // 0..1 fog thickness (thin by default; thickens before rain)
 let rainInt = 0, rainTarget = 0;         // 0..1 rain intensity
 function setWorld(dt_, w) {
   if (typeof dt_ === "number") serverDayT = dt_;
@@ -835,15 +1007,20 @@ function makeDeer() {
 function makeWendigo() {                            // tall, dark, skinny figure
   const g = new THREE.Group();
   const dark = ps1Material({ color: 0x141416 });
-  const wbody = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.6, 0.28), dark); wbody.position.y = 2.2; g.add(wbody);
-  const whead = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.3), dark); whead.position.y = 3.15; g.add(whead);
+  const wbody = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.5, 0.28), dark); wbody.position.y = 2.35; g.add(wbody);
+  const whead = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.3), dark); whead.position.y = 3.25; g.add(whead);
   const antMat = ps1Material({ color: 0x8a8a80 });
-  for (const s of [-1, 1]) { const a = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.7, 4), antMat); a.position.set(s * 0.12, 3.55, 0); a.rotation.z = s * 0.4; g.add(a); }
-  const legs = [];
-  for (const s of [-1, 1]) {
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.5, 0.12), dark); arm.position.set(s * 0.32, 2.1, 0); g.add(arm);
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.6, 0.14), dark); leg.position.set(s * 0.14, 0.8, 0); g.add(leg); legs.push(leg);
+  for (const s of [-1, 1]) { const a = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.7, 4), antMat); a.position.set(s * 0.12, 3.65, 0); a.rotation.z = s * 0.4; g.add(a); }
+  // limbs pivot from the joint (shoulder / hip) and hang DOWN — same rig as makePaleFigure's limb(),
+  // so the stride code swings them from the hip instead of sliding a centered box.
+  function wlimb(x, y, w, h) {
+    const pivot = new THREE.Group(); pivot.position.set(x, y, 0);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), dark); mesh.position.y = -h / 2;
+    pivot.add(mesh); g.add(pivot); return pivot;
   }
+  wlimb(-0.34, 3.0, 0.12, 1.5);                    // arms hang from the shoulders
+  wlimb( 0.34, 3.0, 0.12, 1.5);
+  const legs = [ wlimb(-0.14, 1.65, 0.16, 1.65), wlimb(0.14, 1.65, 0.16, 1.65) ];   // legs swing from the hips (feet reach the ground)
   g.add(makeBlobShadow(0.55));
   g.userData.legs = legs; return g;
 }
@@ -1146,7 +1323,7 @@ async function saveMap() {
 }
 
 addEventListener("keydown", (e) => {
-  if (e.code === "Tab") { e.preventDefault(); toggleEditor(); return; }
+  if (e.code === "Backquote") { e.preventDefault(); toggleEditor(); return; }   // map editor (moved off Tab, which now opens crafting)
   if (!editing) return;
   if (e.code === "BracketLeft")  { selIndex = (selIndex - 1 + palette.length) % palette.length; rebuildGhost(); updateEditorHUD(); }
   else if (e.code === "BracketRight") { selIndex = (selIndex + 1) % palette.length; rebuildGhost(); updateEditorHUD(); }
@@ -1156,11 +1333,331 @@ addEventListener("keydown", (e) => {
   else if (e.code === "Backspace") { e.preventDefault(); deleteNearest(); }
   else if (e.code === "KeyP") { saveMap(); }
 });
-addEventListener("wheel", (e) => { if (!editing) return; selIndex = (selIndex + (e.deltaY > 0 ? 1 : -1) + palette.length) % palette.length; rebuildGhost(); updateEditorHUD(); }, { passive: true });
+addEventListener("wheel", (e) => {
+  if (editing) { selIndex = (selIndex + (e.deltaY > 0 ? 1 : -1) + palette.length) % palette.length; rebuildGhost(); updateEditorHUD(); return; }
+  if (activeItem === "build") cyclePiece(e.deltaY > 0 ? 1 : -1);   // scroll cycles build pieces
+}, { passive: true });
 document.addEventListener("mousedown", (e) => {
   if (e.button !== 0 || !locked) return;
-  if (editing) placeSelected(); else fire();
+  if (editing) { placeSelected(); return; }
+  primaryAction();                                   // left-click = use active item (also bound to F)
 });
+
+// ==================================================================
+//  SURVIVAL  — inventory, hotbar, health, hunger, chopping, building, crafting, cooking
+// ==================================================================
+const inv = { wood: 0, rawMeat: 0, cookedMeat: 0, stone: 0 };
+let activeItem = "axe";                 // axe | rifle | build | none  (you SPAWN with the axe)
+let hp = 100; const maxHp = 100;
+let hunger = 100; const maxHunger = 100;
+let dead = false, starveT = 0, hurtFlash = 0;
+let crouchToggle = false;
+let menuOpen = false, craftOpen = false, bindsOpen = false;
+const spawnPoint = { x: 0, z: 0 };
+
+// ---- item switching ----
+function setItem(it) {
+  activeItem = it;
+  if (it !== "rifle") { rmbAim = false; }
+  if (it === "build") rebuildBuildGhost(); else buildGhost.visible = false;
+  updateHotbarHUD();
+}
+
+function primaryAction() {
+  if (dead || menuOpen || editing) return;
+  if (activeItem === "rifle") fire();
+  else if (activeItem === "axe") swingAxe();
+  else if (activeItem === "build") placeBuild();
+}
+
+// ---- axe: swing, chop trees for wood, chip rocks for stone ----
+function treeRoot(obj) { let o = obj; while (o && o.parent !== forest) o = o.parent; return o; }
+function swingAxe() {
+  const now = performance.now();
+  if (now - lastSwing < 550) return;
+  lastSwing = now; axeSwing = 1;
+  if (net && net.readyState === 1) net.send(JSON.stringify({ t: "swing" }));
+  chopSound();
+  raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+  const tHits = raycaster.intersectObjects(forest.children, true);
+  if (tHits.length && tHits[0].distance < 3.6) {
+    const tree = treeRoot(tHits[0].object);
+    if (tree && tree.userData.chop) { spawnChips(tHits[0].point); if (--tree.userData.chop.hp <= 0) fellTree(tree); return; }
+  }
+  const rHits = raycaster.intersectObjects(rocks.children, true);
+  if (rHits.length && rHits[0].distance < 3.2) { spawnChips(rHits[0].point); if (Math.random() < 0.5) { inv.stone++; updateHotbarHUD(); } }
+}
+function fellTree(tree) {
+  const c = tree.userData.chop.col; const ci = colliders.indexOf(c); if (ci >= 0) colliders.splice(ci, 1);
+  inv.wood += tree.userData.chop.wood; updateHotbarHUD(); showToast("+" + tree.userData.chop.wood + " wood");
+  const stump = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.4, 6), trunkMat);
+  stump.position.set(tree.position.x, terrainHeight(tree.position.x, tree.position.z) + 0.2, tree.position.z);
+  scene.add(stump);
+  forest.remove(tree);
+}
+function spawnChips(pos) {
+  for (let i = 0; i < 6; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.06, 0.06),
+      new THREE.MeshBasicMaterial({ color: 0x6b4a2c, transparent: true, opacity: 0.95, fog: true, side: THREE.DoubleSide }));
+    m.position.copy(pos);
+    m.userData.vel = new THREE.Vector3((Math.random() - 0.5) * 2.5, Math.random() * 2 + 1, (Math.random() - 0.5) * 2.5);
+    scene.add(m); gore.push({ mesh: m, life: 0, ttl: 0.8, grav: true });
+  }
+}
+function chopSound() {
+  const ctx = THREE.AudioContext.getContext(); if (ctx.state !== "running") return;
+  const t = ctx.currentTime;
+  const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.setValueAtTime(210, t); o.frequency.exponentialRampToValueAtTime(70, t + 0.12);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+  o.connect(g).connect(listener.getInput()); o.start(t); o.stop(t + 0.18);
+}
+function eatSound() {
+  const ctx = THREE.AudioContext.getContext(); if (ctx.state !== "running") return;
+  const t = ctx.currentTime;
+  const o = ctx.createOscillator(); o.type = "sine"; o.frequency.setValueAtTime(140, t); o.frequency.linearRampToValueAtTime(90, t + 0.2);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+  o.connect(g).connect(listener.getInput()); o.start(t); o.stop(t + 0.26);
+}
+
+// ---- interact (E): loot meat / light+cook at campfire / eat ----
+function nearestBuild(range) {
+  let best = null, bd = range;
+  for (const rec of buildRecords.values()) { const d = Math.hypot(rec.x - playerPos.x, rec.z - playerPos.z); if (d < bd) { bd = d; best = rec; } }
+  return best;
+}
+function interact() {
+  if (dead || menuOpen || editing) return;
+  for (const c of corpses) {
+    if (c.looted) continue;
+    if (Math.hypot(c.mesh.position.x - playerPos.x, c.mesh.position.z - playerPos.z) < 3) { c.looted = true; inv.rawMeat += 2; updateHotbarHUD(); showToast("+2 raw meat"); return; }
+  }
+  const cf = nearestBuild(3.0);
+  if (cf && cf.piece === "campfire") {
+    if (!cf.lit) { if (inv.wood >= 1) { inv.wood--; cf.lit = true; cf.fuel = 40; lightCampfire(cf); updateHotbarHUD(); showToast("campfire lit"); } else showToast("need 1 wood"); return; }
+    if (inv.rawMeat > 0) { inv.rawMeat--; cf.cookQueue++; updateHotbarHUD(); showToast("cooking meat..."); return; }
+    showToast("no raw meat");
+    return;
+  }
+  if (eatCooked()) return;
+  if (inv.rawMeat > 0) showToast("cook it at a campfire first");
+}
+function eatCooked() {
+  if (inv.cookedMeat > 0) { inv.cookedMeat--; hunger = Math.min(maxHunger, hunger + 35); updateHotbarHUD(); eatSound(); showToast("ate cooked meat"); return true; }
+  return false;
+}
+
+// ---- health / hunger / death ----
+function setLocalHp(v) { const dmg = v < hp; hp = v; if (dmg) hurtFlash = 1; updateBars(); }
+function onLocalDeath(cause) {
+  dead = true; hurtFlash = 1; updateBars();
+  const el = document.getElementById("deathscreen");
+  if (el) { el.querySelector(".cause").textContent = cause === "wendigo" ? "the wendigo took you" : cause === "starve" ? "you starved" : "you were killed"; el.classList.add("on"); }
+  document.exitPointerLock?.();
+}
+function onLocalRespawn(x, z, nhp) {
+  dead = false; hp = nhp ?? maxHp; hunger = maxHunger; starveT = 0;
+  playerPos.set(x, 0, z); pitch = 0; crouchToggle = false;
+  setItem("axe");
+  const el = document.getElementById("deathscreen"); if (el) el.classList.remove("on");
+  updateBars(); updateHotbarHUD();
+}
+
+function updateSurvival(dt, run, moving) {
+  if (!dead) {
+    hunger = Math.max(0, hunger - dt * (run && moving ? 0.9 : 0.4));   // drains; running burns faster
+    if (hunger <= 0) { starveT += dt; if (starveT > 2) { starveT = 0; if (net && net.readyState === 1) net.send(JSON.stringify({ t: "starve" })); } }
+    else starveT = 0;
+  }
+  hurtFlash = Math.max(0, hurtFlash - dt * 1.5);
+  const hurt = document.getElementById("hurt"); if (hurt) hurt.style.opacity = (hurtFlash * 0.5).toFixed(3);
+  // campfires burn / cook
+  for (const rec of buildRecords.values()) {
+    if (rec.piece !== "campfire" || !rec.lit) continue;
+    rec.fuel -= dt; if (rec.fuel <= 0) { extinguish(rec); continue; }
+    if (rec.flame) { rec.flame.quaternion.copy(camera.quaternion); rec.flame.scale.setScalar(0.85 + Math.sin(performance.now() * 0.02) * 0.2); }
+    if (rec.cookQueue > 0) { rec.cookT += dt; if (rec.cookT > 4) { rec.cookT = 0; rec.cookQueue--; inv.cookedMeat++; updateHotbarHUD(); showToast("meat cooked!"); } }
+  }
+  updateBars(); updateBuildGhost(); updatePrompt();
+}
+
+// ---- building: shaped pieces, socket/grid snap, server-synced ----
+const buildMat = ps1Material({ map: noiseTexture([124, 92, 58], 24) });   // planks
+const buildMatDark = ps1Material({ color: 0x4a3520 });
+const BUILD_PIECES = ["foundation", "wall", "doorway", "floor", "campfire"];
+const PIECE_COST = { foundation: 10, wall: 5, doorway: 6, floor: 8, campfire: 5 };
+let buildPiece = "foundation", buildRot = 0, buildTarget = null;
+const buildings = new THREE.Group(); scene.add(buildings);
+const buildRecords = new Map();
+const buildGhostMat = new THREE.MeshBasicMaterial({ color: 0x66ff99, transparent: true, opacity: 0.4, fog: false, depthWrite: false });
+const buildGhost = new THREE.Group(); buildGhost.visible = false; scene.add(buildGhost);
+
+function makeBuildPiece(piece) {
+  const g = new THREE.Group();
+  if (piece === "foundation") {
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(4, 0.3, 4), buildMat); slab.position.y = 0.15; g.add(slab);
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) { const p = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.5, 0.3), buildMatDark); p.position.set(sx * 1.85, 0.4, sz * 1.85); g.add(p); }
+  } else if (piece === "floor") {
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 4), buildMat); slab.position.y = 0.1; g.add(slab);
+  } else if (piece === "wall") {
+    const w = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 0.2), buildMat); w.position.y = 1.5; g.add(w);
+  } else if (piece === "doorway") {
+    for (const sx of [-1, 1]) { const post = new THREE.Mesh(new THREE.BoxGeometry(1.0, 3, 0.2), buildMat); post.position.set(sx * 1.5, 1.5, 0); g.add(post); }
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(4, 0.7, 0.2), buildMat); lintel.position.set(0, 2.65, 0); g.add(lintel);
+  } else if (piece === "campfire") {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.55, 0.14, 5, 8), rockMat0); ring.rotation.x = Math.PI / 2; ring.position.y = 0.14; g.add(ring);
+    for (let i = 0; i < 4; i++) { const log = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.9, 5), buildMatDark); log.position.y = 0.18; log.rotation.set(0, i * 0.8, Math.PI / 2 - 0.2 + i * 0.12); g.add(log); }
+  }
+  return g;
+}
+function rebuildBuildGhost() {
+  while (buildGhost.children.length) buildGhost.remove(buildGhost.children[0]);
+  const g = makeBuildPiece(buildPiece); g.traverse(o => { if (o.isMesh) o.material = buildGhostMat; }); buildGhost.add(g);
+}
+function cyclePiece(dir) {
+  const i = (BUILD_PIECES.indexOf(buildPiece) + dir + BUILD_PIECES.length) % BUILD_PIECES.length;
+  buildPiece = BUILD_PIECES[i]; rebuildBuildGhost(); updateHotbarHUD();
+}
+function nearestBuildOf(piece, px, pz, range) {
+  let best = null, bd = range;
+  for (const rec of buildRecords.values()) { if (rec.piece !== piece) continue; const d = Math.hypot(rec.x - px, rec.z - pz); if (d < bd) { bd = d; best = rec; } }
+  return best;
+}
+function computeBuildSnap() {
+  raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+  const hit = raycaster.intersectObjects([ground, ...buildings.children], true)[0];
+  let px = playerPos.x - Math.sin(headYaw) * 4, pz = playerPos.z - Math.cos(headYaw) * 4;
+  if (hit && hit.distance < 12) { px = hit.point.x; pz = hit.point.z; }
+  if (buildPiece === "campfire") return { x: +px.toFixed(2), y: terrainHeight(px, pz), z: +pz.toFixed(2), ry: buildRot };
+  if (buildPiece === "foundation" || buildPiece === "floor") {
+    const gx = Math.round(px / 4) * 4, gz = Math.round(pz / 4) * 4;
+    if (buildPiece === "floor") { const f = nearestBuildOf("foundation", gx, gz, 1.0); return { x: gx, y: (f ? f.y : terrainHeight(gx, gz)) + 3, z: gz, ry: 0 }; }
+    return { x: gx, y: terrainHeight(gx, gz), z: gz, ry: 0 };
+  }
+  // wall / doorway snap to nearest foundation edge (socket-style)
+  const near = nearestBuildOf("foundation", px, pz, 4.5);
+  if (near) {
+    const edges = [ { x: near.x, z: near.z + 2, ry: 0 }, { x: near.x, z: near.z - 2, ry: 0 },
+                    { x: near.x + 2, z: near.z, ry: Math.PI / 2 }, { x: near.x - 2, z: near.z, ry: Math.PI / 2 } ];
+    let best = edges[0], bd = Infinity;
+    for (const e of edges) { const d = Math.hypot(e.x - px, e.z - pz); if (d < bd) { bd = d; best = e; } }
+    return { x: best.x, y: near.y, z: best.z, ry: best.ry };
+  }
+  return { x: +px.toFixed(2), y: terrainHeight(px, pz), z: +pz.toFixed(2), ry: buildRot };
+}
+function updateBuildGhost() {
+  if (activeItem !== "build" || menuOpen || dead || !locked) { buildGhost.visible = false; return; }
+  const s = computeBuildSnap(); buildTarget = s;
+  buildGhost.position.set(s.x, s.y, s.z); buildGhost.rotation.y = s.ry; buildGhost.visible = true;
+}
+function placeBuild() {
+  if (!buildGhost.visible || !buildTarget) return;
+  const cost = PIECE_COST[buildPiece];
+  if (inv.wood < cost) { showToast("need " + cost + " wood"); return; }
+  inv.wood -= cost; updateHotbarHUD();
+  if (net && net.readyState === 1) net.send(JSON.stringify({ t: "build", piece: buildPiece, x: buildTarget.x, y: buildTarget.y, z: buildTarget.z, ry: buildTarget.ry }));
+}
+function pushWallColliders(rec) {
+  const dirx = Math.cos(rec.ry), dirz = -Math.sin(rec.ry); rec.cols = [];
+  for (const o of [-1.3, 0, 1.3]) { const c = { x: rec.x + dirx * o, z: rec.z + dirz * o, r: 0.55 }; colliders.push(c); rec.cols.push(c); }
+}
+function addBuild(b) {
+  if (buildRecords.has(b.id)) return;
+  const mesh = makeBuildPiece(b.piece); mesh.position.set(b.x, b.y, b.z); mesh.rotation.y = b.ry || 0; mesh.userData.bid = b.id;
+  buildings.add(mesh);
+  const rec = { id: b.id, piece: b.piece, mesh, x: b.x, y: b.y, z: b.z, ry: b.ry || 0, by: b.by, lit: false, fuel: 0, cookQueue: 0, cookT: 0, cols: [] };
+  buildRecords.set(b.id, rec);
+  if (b.piece === "wall") pushWallColliders(rec);
+  else if (b.piece === "doorway") { const dirx = Math.cos(rec.ry), dirz = -Math.sin(rec.ry); for (const o of [-1.5, 1.5]) { const c = { x: b.x + dirx * o, z: b.z + dirz * o, r: 0.5 }; colliders.push(c); rec.cols.push(c); } }
+  else if (b.piece === "campfire") { const c = { x: b.x, z: b.z, r: 0.6 }; colliders.push(c); rec.cols.push(c); }
+}
+function removeBuild(id) {
+  const rec = buildRecords.get(id); if (!rec) return;
+  buildings.remove(rec.mesh);
+  for (const c of rec.cols) { const i = colliders.indexOf(c); if (i >= 0) colliders.splice(i, 1); }
+  buildRecords.delete(id);
+}
+function lightCampfire(rec) {
+  if (rec.flame) return;
+  const flame = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.85),
+    new THREE.MeshBasicMaterial({ color: 0xffa640, transparent: true, opacity: 0.9, fog: false, blending: THREE.AdditiveBlending, depthWrite: false }));
+  flame.position.y = 0.5; rec.mesh.add(flame); rec.flame = flame;
+  const light = new THREE.PointLight(0xff8030, 1.4, 12); light.position.y = 0.7; rec.mesh.add(light); rec.light = light;
+}
+function extinguish(rec) {
+  if (rec.flame) { rec.mesh.remove(rec.flame); rec.flame = null; }
+  if (rec.light) { rec.mesh.remove(rec.light); rec.light = null; }
+  rec.lit = false;
+}
+
+// ---- HUD ----
+function updateBars() {
+  const h = document.getElementById("healthbar"); if (h) h.style.width = Math.max(0, (hp / maxHp) * 100).toFixed(0) + "%";
+  const g = document.getElementById("hungerbar"); if (g) g.style.width = Math.max(0, (hunger / maxHunger) * 100).toFixed(0) + "%";
+}
+function updateHotbarHUD() {
+  const el = document.getElementById("hotbar"); if (!el) return;
+  const name = activeItem === "build" ? ("BUILD: " + buildPiece + " (" + PIECE_COST[buildPiece] + "w)")
+             : activeItem === "rifle" ? "RIFLE" : activeItem === "axe" ? "AXE" : "— hands —";
+  el.innerHTML = `<b>${name}</b> &nbsp; ⌾ wood ${inv.wood} · meat ${inv.rawMeat}/${inv.cookedMeat}🔥 · stone ${inv.stone}`;
+}
+let toastTimer = 0;
+function showToast(msg) { const el = document.getElementById("toast"); if (!el) return; el.textContent = msg; el.classList.add("on"); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove("on"), 1500); }
+function updatePrompt() {
+  let msg = "";
+  for (const c of corpses) { if (!c.looted && Math.hypot(c.mesh.position.x - playerPos.x, c.mesh.position.z - playerPos.z) < 3) { msg = "[E] take meat"; break; } }
+  if (!msg) { const cf = nearestBuild(3.0); if (cf && cf.piece === "campfire") msg = cf.lit ? (inv.rawMeat > 0 ? "[E] cook meat" : (inv.cookedMeat > 0 ? "[E] eat" : "")) : "[E] light fire (1 wood)"; }
+  if (!msg && inv.cookedMeat > 0) msg = "[E] eat cooked meat";
+  const el = document.getElementById("prompt"); if (el) { el.textContent = msg; el.style.opacity = msg ? "1" : "0"; }
+}
+
+// ---- crafting menu (Tab) + binds panel (K) ----
+const BINDINGS = [
+  ["Move", "W A S D"], ["Look", "Arrow Keys / Mouse"], ["Run", "Shift"], ["Crouch", "Ctrl hold / C toggle"],
+  ["Use / Attack", "Left-Click / F"], ["Aim rifle", "Right-Click / Q"], ["Interact · Eat", "E"],
+  ["Axe", "1"], ["Rifle", "2"], ["Build mode", "3"], ["Holster", "H"],
+  ["Crafting / Inventory", "Tab"], ["Build: rotate", "R"], ["Build: cycle piece", "[ ]  /  Wheel"],
+  ["Binds panel", "K"], ["Map editor", "` backtick"],
+];
+function closeMenus() { craftOpen = false; bindsOpen = false; menuOpen = false; document.getElementById("craft")?.classList.remove("on"); document.getElementById("binds")?.classList.remove("on"); }
+function toggleBinds() {
+  bindsOpen = !bindsOpen; if (bindsOpen) craftOpen = false;
+  menuOpen = bindsOpen || craftOpen;
+  const el = document.getElementById("binds");
+  if (el) { el.classList.toggle("on", bindsOpen); if (bindsOpen) el.querySelector(".rows").innerHTML = BINDINGS.map(b => `<div class="row"><span>${b[0]}</span><b>${b[1]}</b></div>`).join(""); }
+  document.getElementById("craft")?.classList.toggle("on", craftOpen);
+  if (menuOpen) document.exitPointerLock?.();
+}
+function toggleCraft() {
+  craftOpen = !craftOpen; if (craftOpen) bindsOpen = false;
+  menuOpen = craftOpen || bindsOpen;
+  document.getElementById("binds")?.classList.remove("on");
+  const el = document.getElementById("craft");
+  if (el) { el.classList.toggle("on", craftOpen); if (craftOpen) renderCraft(); }
+  if (menuOpen) document.exitPointerLock?.();
+}
+function renderCraft() {
+  const el = document.getElementById("craft"); if (!el) return;
+  const body = el.querySelector(".body");
+  const pieceRows = BUILD_PIECES.map(p => {
+    const cost = PIECE_COST[p], ok = inv.wood >= cost;
+    return `<button class="craftbtn ${ok ? "" : "no"}" data-piece="${p}">${p} <span>${cost} wood</span></button>`;
+  }).join("");
+  body.innerHTML =
+    `<div class="inv">wood <b>${inv.wood}</b> · stone <b>${inv.stone}</b> · raw meat <b>${inv.rawMeat}</b> · cooked <b>${inv.cookedMeat}</b></div>
+     <div class="sec">BUILD  <small>(select a piece, then place with Left-Click / F · rotate R · cycle [ ])</small></div>
+     <div class="grid">${pieceRows}</div>
+     <div class="sec">CONSUME</div>
+     <div class="grid">
+       <button class="craftbtn ${inv.cookedMeat > 0 ? "" : "no"}" data-act="eat">eat cooked meat <span>+35 hunger</span></button>
+     </div>
+     <div class="hint">meat comes from shot deer (walk up, press E). cook raw meat at a lit campfire.</div>`;
+  body.querySelectorAll("[data-piece]").forEach(b => b.onclick = () => { buildPiece = b.dataset.piece; setItem("build"); closeMenus(); });
+  body.querySelectorAll("[data-act='eat']").forEach(b => b.onclick = () => { eatCooked(); renderCraft(); updateBars(); });
+}
+document.getElementById("bindsBtn")?.addEventListener("click", toggleBinds);
+for (const pid of ["craft", "binds"]) { const p = document.getElementById(pid); if (p) p.addEventListener("mousedown", e => { if (e.target === p) closeMenus(); }); }
+
+rebuildBuildGhost(); updateHotbarHUD(); updateBars();
 
 // ------------------------------------------------------------------ boot the content pipeline
 (async () => { await loadManifest(); await loadMap("main"); })();
