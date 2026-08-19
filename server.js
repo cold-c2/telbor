@@ -139,8 +139,8 @@ wss.on("connection", (ws) => {
     let m; try { m = JSON.parse(data); } catch { return; }
     if (m.t === "move") {
       const p = players.get(id); if (!p) return;
-      Object.assign(p.state, { x: m.x, y: m.y, z: m.z, ry: m.ry, hy: m.hy, ph: m.ph, cr: m.cr, fy: m.fy });
-      broadcast({ t: "move", id, x: m.x, y: m.y, z: m.z, ry: m.ry, hy: m.hy, ph: m.ph, cr: m.cr, fy: m.fy }, id);
+      Object.assign(p.state, { x: m.x, y: m.y, z: m.z, ry: m.ry, hy: m.hy, ph: m.ph, cr: m.cr, fy: m.fy, am: m.am, eq: m.eq });
+      broadcast({ t: "move", id, x: m.x, y: m.y, z: m.z, ry: m.ry, hy: m.hy, ph: m.ph, cr: m.cr, fy: m.fy, am: m.am, eq: m.eq }, id);
     } else if (m.t === "shot") {
       broadcast({ t: "shot", id }, id);
       const p = players.get(id);              // scare nearby deer

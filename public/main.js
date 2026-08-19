@@ -37,6 +37,7 @@ scene.background = new THREE.Color(FOG_COLOR);
 scene.fog = new THREE.Fog(FOG_COLOR, 6, 46);
 
 const camera = new THREE.PerspectiveCamera(68, 400 / 300, 0.1, 200);
+scene.add(camera);   // REQUIRED: children of the camera (the first-person gun) only render if the camera is in the scene
 
 // ------------------------------------------------------------------ lights (driven by the day/night cycle)
 const hemi = new THREE.HemisphereLight(0xf2f4f2, 0x585850, 1.15);
@@ -347,7 +348,7 @@ function connect() {
       spawnRemote(m.id, m);
     } else if (m.t === "move") {
       const f = remote.get(m.id);
-      if (f) f.userData.target = { x: m.x, z: m.z, ry: m.ry, hy: m.hy || 0, ph: m.ph || 0, cr: m.cr || 0, fy: m.fy || 0 };
+      if (f) f.userData.target = { x: m.x, z: m.z, ry: m.ry, hy: m.hy || 0, ph: m.ph || 0, cr: m.cr || 0, fy: m.fy || 0, am: m.am || 0, eq: m.eq ?? 1 };
     } else if (m.t === "shot") {
       const f = remote.get(m.id); if (f) flashMuzzle(f);
     } else if (m.t === "leave") {
@@ -378,7 +379,7 @@ function sendState(now) {
   if (now - lastSend < 66) return; // ~15 Hz
   lastSend = now;
   net.send(JSON.stringify({ t: "move", x: playerPos.x, y: 0, z: playerPos.z, ry: bodyYaw, hy: headYaw,
-    ph: pitch, cr: crouching ? 1 : 0, fy: editorAlt }));
+    ph: pitch, cr: crouching ? 1 : 0, fy: editorAlt, am: aiming && equipped ? 1 : 0, eq: equipped ? 1 : 0 }));
 }
 
 // ------------------------------------------------------------------ grain overlay
@@ -437,13 +438,17 @@ function animateLimbs(fig, sw) {
 }
 
 // ------------------------------------------------------------------ main loop
+const FPS_CAP = 120;                 // render up to 120fps (high-refresh monitors), never more
 let last = performance.now();
+let lastRender = 0;
 let walkPhase = 0;
 let frameCount = 0;
 let clockLast = 0;
 
 function frame(now) {
   requestAnimationFrame(frame);
+  if (now - lastRender < 1000 / FPS_CAP - 0.5) return;   // fps cap
+  lastRender = now;
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
 
   updateDay(dt); updateFx(dt); updateGore(dt); updateNetAnimals(dt);
@@ -518,6 +523,16 @@ function frame(now) {
     f.userData.limbs.head.rotation.x = t.ph || 0;                            // look up/down
     f.userData.crv += ((t.cr ? 1 : 0) - f.userData.crv) * Math.min(1, dt * 10);
     f.scale.y = 1 - 0.32 * f.userData.crv;                                   // crouch
+    // rifle + arms follow their look pitch; raised to the shoulder when aiming; hidden when unequipped
+    const rif = f.userData.rifle;
+    if (rif) {
+      rif.visible = !!t.eq;
+      rif.rotation.x = t.ph || 0;
+      rif.position.y = 1.32 + (t.am ? 0.14 : 0);           // shoulder-height when ADS
+      const armPitch = -1.35 + (t.ph || 0) * 0.85;
+      f.userData.limbs.armL.rotation.x = t.eq ? armPitch : 0;
+      f.userData.limbs.armR.rotation.x = t.eq ? armPitch : 0;
+    }
     const spd = Math.hypot(f.position.x - f.userData.px, f.position.z - f.userData.pz) / Math.max(dt, 1e-3);
     f.userData.px = f.position.x; f.userData.pz = f.position.z;
     const rMoving = spd > 0.3;

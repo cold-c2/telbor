@@ -1,0 +1,10 @@
+# One-click Render blueprint: hosts the multiplayer/content server (server.js).
+# In the Render dashboard: New + -> Blueprint -> connect cold-c2/telbor -> Apply.
+# Name it "telbor" so the URL is https://telbor.onrender.com (the web build's default server).
+services:
+  - type: web
+    name: telbor
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
