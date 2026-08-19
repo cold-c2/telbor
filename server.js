@@ -20,6 +20,14 @@ const DIRS = {
 for (const d of [ASSETS, MAPS, ...Object.values(DIRS)]) fs.mkdirSync(d, { recursive: true });
 
 const app = express();
+// allow the web build (hosted on another origin, e.g. Vercel) to reach this server
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 app.use(express.json({ limit: "16mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/assets", express.static(ASSETS));
@@ -84,6 +92,39 @@ setInterval(() => {
   broadcast({ t: "world", dayT, weather });
 }, 1000);
 
+// ---- server-authoritative animals (so everyone sees the SAME creatures in the same spots) ----
+function terrainHeight(x, z) {   // must match the client's terrain
+  return Math.sin(x*0.018)*3.2 + Math.cos(z*0.021)*3.0 + Math.sin(x*0.05)*0.8 + Math.cos(z*0.06)*0.7 + Math.sin((x+z)*0.11)*0.4;
+}
+function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+const arand = mulberry32(20080102);
+const A_SNOW = 150;
+const animals = []; let nextAid = 1;
+for (let i = 0; i < 20; i++) { const a = arand()*6.283, r = 22 + arand()*120; animals.push({ id: nextAid++, kind: "deer", x: Math.cos(a)*r, z: Math.sin(a)*r, ry: 0, heading: arand()*6.283, state: "wander", timer: arand()*3, speed: 0, dead: false }); }
+for (let i = 0; i < 4;  i++) { const a = arand()*6.283, r = A_SNOW+20 + arand()*90; animals.push({ id: nextAid++, kind: "wendigo", x: Math.cos(a)*r, z: Math.sin(a)*r, ry: 0, heading: arand()*6.283, state: "wander", timer: arand()*3, speed: 0, dead: false }); }
+function wrapA(a){ while(a>Math.PI)a-=6.28318; while(a<-Math.PI)a+=6.28318; return a; }
+function animalTick(dt) {
+  for (const a of animals) {
+    if (a.dead) continue;
+    a.timer -= dt;
+    let seen = null;
+    for (const [, p] of players) {
+      const st = p.state, dx = st.x - a.x, dz = st.z - a.z, d = Math.hypot(dx, dz);
+      let vd = a.kind === "wendigo" ? 60 : 34; if (st.cr) vd *= 0.45;
+      if (d < vd && Math.abs(wrapA(Math.atan2(dz, dx) - a.heading)) < 1.1) { seen = st; break; }
+    }
+    if (seen) { if (a.kind === "deer") { a.state = "flee"; a.timer = 3 + arand()*2; a.heading = Math.atan2(a.z - seen.z, a.x - seen.x); } else a.state = "hunt"; }
+    if (a.state === "flee") { a.speed = 9; if (a.timer <= 0) a.state = "wander"; }
+    else if (a.state === "hunt") { if (seen) { a.heading = Math.atan2(seen.z - a.z, seen.x - a.x); a.speed = 3.2; } else if (a.timer <= 0) { a.state = "wander"; a.timer = 2; } }
+    else { a.speed = a.kind === "wendigo" ? 1.2 : 1.6; if (a.timer <= 0) { a.heading += (Math.random()-0.5)*1.5; a.timer = 1.5 + Math.random()*3; if (Math.random() < 0.3) a.speed = 0; } }
+    a.x += Math.cos(a.heading) * a.speed * dt; a.z += Math.sin(a.heading) * a.speed * dt;
+    if (Math.hypot(a.x, a.z) > 340) a.heading += Math.PI;
+    a.ry = Math.atan2(-Math.cos(a.heading), -Math.sin(a.heading));
+  }
+}
+function animalsSnapshot(){ return animals.filter(a => !a.dead).map(a => ({ id: a.id, k: a.kind, x: +a.x.toFixed(2), z: +a.z.toFixed(2), ry: +a.ry.toFixed(2), s: a.state })); }
+setInterval(() => { animalTick(0.1); broadcast({ t: "animals", a: animalsSnapshot() }); }, 100);
+
 wss.on("connection", (ws) => {
   const id = nextId++;
   const state = { x: 0, y: 0, z: 0, ry: 0, hy: 0, ph: 0, cr: 0, fy: 0, name: "wanderer" };
@@ -91,7 +132,7 @@ wss.on("connection", (ws) => {
 
   const others = [];
   for (const [oid, p] of players) if (oid !== id) others.push({ id: oid, ...p.state });
-  ws.send(JSON.stringify({ t: "welcome", id, others, dayT, weather }));
+  ws.send(JSON.stringify({ t: "welcome", id, others, dayT, weather, animals: animalsSnapshot() }));
   broadcast({ t: "join", id, ...state }, id);
 
   ws.on("message", (data) => {
@@ -102,6 +143,14 @@ wss.on("connection", (ws) => {
       broadcast({ t: "move", id, x: m.x, y: m.y, z: m.z, ry: m.ry, hy: m.hy, ph: m.ph, cr: m.cr, fy: m.fy }, id);
     } else if (m.t === "shot") {
       broadcast({ t: "shot", id }, id);
+      const p = players.get(id);              // scare nearby deer
+      if (p) { const st = p.state; for (const a of animals) if (a.kind === "deer" && !a.dead) { const d = Math.hypot(a.x - st.x, a.z - st.z); if (d < 90) { a.state = "flee"; a.timer = 4 + Math.random()*2; a.heading = Math.atan2(a.z - st.z, a.x - st.x); } } }
+    } else if (m.t === "hit") {
+      const a = animals.find(x => x.id === m.id && !x.dead);
+      if (a) {
+        if (a.kind === "wendigo") { a.state = "flee"; a.timer = 3; }   // wendigos don't drop
+        else { a.dead = true; broadcast({ t: "akill", id: a.id, x: +a.x.toFixed(2), z: +a.z.toFixed(2) }); }
+      }
     }
   });
 

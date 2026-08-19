@@ -2,8 +2,9 @@
 // Pure Node, no deps: writes a 32bpp BMP-based .ico by hand.
 import fs from "fs";
 
-const W = 64, H = 64;
-function px(x, y) {
+const W = 256, H = 256;                        // electron-builder requires >= 256
+function px(px_, py_) {
+  const x = px_ >> 2, y = py_ >> 2;            // design in a crisp 64-grid, scaled 4x to 256
   let r = 11, g = 15, b = 26;                 // dark night-blue field
   const inb = (x0, x1, y0, y1) => x >= x0 && x < x1 && y >= y0 && y < y1;
   const pale = () => { r = 222; g = 222; b = 224; };
@@ -24,7 +25,8 @@ hdr.writeUInt16LE(0, 0); hdr.writeUInt16LE(1, 2); hdr.writeUInt16LE(1, 4);
 const andRow = Math.ceil(W / 32) * 4;
 const imgSize = 40 + W * H * 4 + andRow * H;
 const ent = Buffer.alloc(16);
-ent.writeUInt8(W, 0); ent.writeUInt8(H, 1); ent.writeUInt8(0, 2); ent.writeUInt8(0, 3);
+const wb = W >= 256 ? 0 : W, hb = H >= 256 ? 0 : H;   // 0 means 256 in the ICO spec
+ent.writeUInt8(wb, 0); ent.writeUInt8(hb, 1); ent.writeUInt8(0, 2); ent.writeUInt8(0, 3);
 ent.writeUInt16LE(1, 4); ent.writeUInt16LE(32, 6); ent.writeUInt32LE(imgSize, 8); ent.writeUInt32LE(22, 12);
 const bih = Buffer.alloc(40);
 bih.writeUInt32LE(40, 0); bih.writeInt32LE(W, 4); bih.writeInt32LE(H * 2, 8);
