@@ -143,36 +143,68 @@ function respawnDue() {
 const builds = [];               // { id, piece, x, y, z, ry, by }
 let nextBid = 1;
 const PIECES = new Set(["foundation", "wall", "doorway", "floor", "campfire"]);
+// solid cylinders the ANIMALS collide with too (so nothing walks through your walls)
+const buildColliders = [];       // { x, z, r, bid }
+function addBuildColliders(b) {
+  const dx = Math.cos(b.ry || 0), dz = -Math.sin(b.ry || 0);
+  if (b.piece === "wall")        for (const o of [-1.3, 0, 1.3]) buildColliders.push({ x: b.x + dx * o, z: b.z + dz * o, r: 0.55, bid: b.id });
+  else if (b.piece === "doorway") for (const o of [-1.5, 1.5])   buildColliders.push({ x: b.x + dx * o, z: b.z + dz * o, r: 0.5, bid: b.id });
+  else if (b.piece === "campfire") buildColliders.push({ x: b.x, z: b.z, r: 0.6, bid: b.id });
+}
+function removeBuildColliders(id) { for (let i = buildColliders.length - 1; i >= 0; i--) if (buildColliders[i].bid === id) buildColliders.splice(i, 1); }
 
 // ---- server-authoritative animals (so everyone sees the SAME creatures in the same spots) ----
 const A_SNOW = 150;
 const animals = []; let nextAid = 1;
 for (let i = 0; i < 20; i++) { const a = arand()*6.283, r = 22 + arand()*120; animals.push({ id: nextAid++, kind: "deer", x: Math.cos(a)*r, z: Math.sin(a)*r, ry: 0, heading: arand()*6.283, state: "wander", timer: arand()*3, speed: 0, dead: false }); }
-for (let i = 0; i < 4;  i++) { const a = arand()*6.283, r = A_SNOW+20 + arand()*90; animals.push({ id: nextAid++, kind: "wendigo", x: Math.cos(a)*r, z: Math.sin(a)*r, ry: 0, heading: arand()*6.283, state: "wander", timer: arand()*3, speed: 0, dead: false }); }
+for (let i = 0; i < 4;  i++) { const a = arand()*6.283, r = A_SNOW+20 + arand()*90; animals.push({ id: nextAid++, kind: "wendigo", x: Math.cos(a)*r, z: Math.sin(a)*r, ry: 0, heading: arand()*6.283, state: "wander", timer: arand()*3, speed: 0, dead: false, hp: 180 }); }
 function wrapA(a){ while(a>Math.PI)a-=6.28318; while(a<-Math.PI)a+=6.28318; return a; }
+const WENDIGO_AGGRO = 170;              // wendigos lock onto any living player within this range
+function nearestLivingPlayer(a) {
+  let best = null, bd = Infinity, bid = null;
+  for (const [pid, p] of players) {
+    const st = p.state; if (st.dead) continue;
+    const d = Math.hypot(st.x - a.x, st.z - a.z);
+    if (d < bd) { bd = d; best = st; bid = pid; }
+  }
+  return { st: best, d: bd, id: bid };
+}
 function animalTick(dt) {
   const now = Date.now();
   for (const a of animals) {
     if (a.dead) continue;
     a.timer -= dt;
-    let seen = null, seenId = null;
-    for (const [pid, p] of players) {
-      const st = p.state; if (st.dead) continue;
-      const dx = st.x - a.x, dz = st.z - a.z, d = Math.hypot(dx, dz);
-      let vd = a.kind === "wendigo" ? 60 : 34; if (st.cr) vd *= 0.45;
-      if (d < vd && Math.abs(wrapA(Math.atan2(dz, dx) - a.heading)) < 1.1) { seen = st; seenId = pid; break; }
+    if (a.kind === "wendigo") {
+      // ALWAYS re-route to whoever is closest — reacquire the nearest player every tick
+      const np = nearestLivingPlayer(a);
+      if (np.st && np.d < WENDIGO_AGGRO) {
+        a.state = "hunt";
+        a.heading = Math.atan2(np.st.z - a.z, np.st.x - a.x);
+        a.speed = 3.6;
+        if (np.d < 2.6 && now - (a.lastBite || 0) > 900) { a.lastBite = now; applyDamage(np.id, 20, "wendigo"); }
+      } else {                                    // nobody near: prowl
+        a.state = "wander"; a.speed = 1.3;
+        if (a.timer <= 0) { a.heading += (Math.random() - 0.5) * 1.2; a.timer = 1.5 + Math.random() * 3; if (Math.random() < 0.25) a.speed = 0; }
+      }
+    } else {                                      // deer: skittish, flee when they see you
+      let seen = null;
+      for (const [, p] of players) {
+        const st = p.state; if (st.dead) continue;
+        const dx = st.x - a.x, dz = st.z - a.z, d = Math.hypot(dx, dz);
+        let vd = 34; if (st.cr) vd *= 0.45;
+        if (d < vd && Math.abs(wrapA(Math.atan2(dz, dx) - a.heading)) < 1.1) { seen = st; break; }
+      }
+      if (seen) { a.state = "flee"; a.timer = 3 + arand() * 2; a.heading = Math.atan2(a.z - seen.z, a.x - seen.x); }
+      if (a.state === "flee") { a.speed = 9; if (a.timer <= 0) a.state = "wander"; }
+      else { a.speed = 1.6; if (a.timer <= 0) { a.heading += (Math.random() - 0.5) * 1.5; a.timer = 1.5 + Math.random() * 3; if (Math.random() < 0.3) a.speed = 0; } }
     }
-    if (seen) { if (a.kind === "deer") { a.state = "flee"; a.timer = 3 + arand()*2; a.heading = Math.atan2(a.z - seen.z, a.x - seen.x); } else a.state = "hunt"; }
-    if (a.state === "flee") { a.speed = 9; if (a.timer <= 0) a.state = "wander"; }
-    else if (a.state === "hunt") {
-      if (seen) {
-        a.heading = Math.atan2(seen.z - a.z, seen.x - a.x); a.speed = 3.4;
-        const d = Math.hypot(seen.x - a.x, seen.z - a.z);              // wendigo mauls players it reaches
-        if (d < 2.6 && now - (a.lastBite || 0) > 900) { a.lastBite = now; applyDamage(seenId, 20, "wendigo"); }
-      } else if (a.timer <= 0) { a.state = "wander"; a.timer = 2; }
-    }
-    else { a.speed = a.kind === "wendigo" ? 1.2 : 1.6; if (a.timer <= 0) { a.heading += (Math.random()-0.5)*1.5; a.timer = 1.5 + Math.random()*3; if (Math.random() < 0.3) a.speed = 0; } }
     a.x += Math.cos(a.heading) * a.speed * dt; a.z += Math.sin(a.heading) * a.speed * dt;
+    // push out of solid builds so nothing walks through walls
+    const ar = a.kind === "wendigo" ? 0.6 : 0.5;
+    for (let it = 0; it < 2; it++) for (const c of buildColliders) {
+      const ex = a.x - c.x, ez = a.z - c.z, d = Math.hypot(ex, ez), min = c.r + ar;
+      if (d < min && d > 1e-4) { a.x = c.x + (ex / d) * min; a.z = c.z + (ez / d) * min; }
+    }
     if (Math.hypot(a.x, a.z) > 340) a.heading += Math.PI;
     a.ry = Math.atan2(-Math.cos(a.heading), -Math.sin(a.heading));
   }
@@ -205,8 +237,10 @@ wss.on("connection", (ws) => {
     } else if (m.t === "hit") {
       const a = animals.find(x => x.id === m.id && !x.dead);
       if (a) {
-        if (a.kind === "wendigo") { a.state = "flee"; a.timer = 3; }   // wendigos don't drop
-        else { a.dead = true; broadcast({ t: "akill", id: a.id, x: +a.x.toFixed(2), z: +a.z.toFixed(2) }); }
+        if (a.kind === "wendigo") {
+          a.hp -= 60;                                                    // wendigos take ~3 rifle rounds
+          if (a.hp <= 0) { a.dead = true; broadcast({ t: "akill", id: a.id, x: +a.x.toFixed(2), z: +a.z.toFixed(2) }); }
+        } else { a.dead = true; broadcast({ t: "akill", id: a.id, x: +a.x.toFixed(2), z: +a.z.toFixed(2) }); }
       }
     } else if (m.t === "phit") {              // shooter claims a hit on another player
       const tgt = players.get(m.id); if (!tgt || tgt.state.dead) return;
@@ -217,11 +251,11 @@ wss.on("connection", (ws) => {
     } else if (m.t === "build") {
       if (!PIECES.has(m.piece)) return;
       const b = { id: nextBid++, piece: m.piece, x: +(+m.x).toFixed(2), y: +(+m.y).toFixed(2), z: +(+m.z).toFixed(2), ry: +(+m.ry || 0).toFixed(3), by: id };
-      builds.push(b); if (builds.length > 4000) builds.shift();
+      builds.push(b); addBuildColliders(b); if (builds.length > 4000) { const old = builds.shift(); removeBuildColliders(old.id); }
       broadcast({ t: "build", b });
     } else if (m.t === "unbuild") {
       const i = builds.findIndex(b => b.id === m.id);
-      if (i >= 0 && (builds[i].by === id)) { const rid = builds[i].id; builds.splice(i, 1); broadcast({ t: "unbuild", id: rid }); }
+      if (i >= 0 && (builds[i].by === id)) { const rid = builds[i].id; builds.splice(i, 1); removeBuildColliders(rid); broadcast({ t: "unbuild", id: rid }); }
     }
   });
 
