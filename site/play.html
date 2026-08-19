@@ -67,6 +67,43 @@
 
   #count { position: absolute; top: 52px; left: 22px; z-index: 8; color: #9a9a9a; font-size: 14px; text-shadow: 1px 1px 0 #000; }
   #fps { position: fixed; top: 72px; left: 22px; z-index: 8; color: #84c884; font-family: "Courier New", monospace; font-size: 14px; text-shadow: 1px 1px 0 #000; pointer-events: none; }
+
+  /* ---- survival HUD ---- */
+  #hurt { z-index: 5; background: radial-gradient(ellipse at center, rgba(120,0,0,0) 40%, rgba(160,0,0,0.7) 100%); opacity: 0; transition: opacity .1s linear; }
+  #bars { position: fixed; left: 22px; bottom: 44px; z-index: 9; width: 210px; font-size: 11px; color: #cdd; letter-spacing: 1px; text-shadow: 1px 1px 0 #000; }
+  #bars .bar { height: 12px; background: rgba(0,0,0,0.55); border: 1px solid #333; margin-top: 3px; }
+  #bars .bar > i { display: block; height: 100%; width: 100%; }
+  #healthbar { background: linear-gradient(#e05a5a, #a01e1e); }
+  #hungerbar { background: linear-gradient(#d0b048, #907818); }
+  #hotbar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 9; color: #d8d8d8; font-size: 13px; background: rgba(0,0,0,0.5); border: 1px solid #333; padding: 5px 12px; text-shadow: 1px 1px 0 #000; white-space: nowrap; }
+  #hotbar b { color: #9fe89f; }
+  #prompt { position: fixed; left: 50%; bottom: 66px; transform: translateX(-50%); z-index: 9; color: #ffe; font-size: 14px; text-shadow: 1px 1px 0 #000; opacity: 0; transition: opacity .15s; }
+  #toast { position: fixed; left: 50%; top: 30%; transform: translateX(-50%); z-index: 12; color: #cfe8cf; font-size: 15px; background: rgba(0,0,0,0.5); padding: 6px 14px; border: 1px solid #444; opacity: 0; transition: opacity .2s; pointer-events: none; text-shadow: 1px 1px 0 #000; }
+  #toast.on { opacity: 1; }
+  #bindsBtn { position: fixed; right: 22px; top: 52px; z-index: 12; pointer-events: auto; cursor: pointer; color: #cfe8cf; background: rgba(0,0,0,0.5); border: 1px solid #444; padding: 4px 10px; font-size: 12px; letter-spacing: 1px; }
+  #bindsBtn:hover { background: rgba(30,50,30,0.6); }
+  /* overlays: crafting + binds + death */
+  .panel { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.55); pointer-events: auto; }
+  .panel.on { display: flex; }
+  .panel .card { width: min(560px, 92vw); max-height: 84vh; overflow: auto; background: #0d0f0e; border: 1px solid #3a4a3a; padding: 18px 20px; color: #cfe8cf; font-size: 13px; box-shadow: 0 0 40px #000; }
+  .panel h2 { font-size: 16px; letter-spacing: 3px; color: #9fe89f; margin-bottom: 10px; }
+  #craft .inv { color: #bcd; margin-bottom: 10px; }
+  #craft .sec { margin: 12px 0 6px; color: #e8d89f; letter-spacing: 2px; font-size: 12px; }
+  #craft .sec small { color: #778; letter-spacing: 0; }
+  #craft .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .craftbtn { display: flex; justify-content: space-between; align-items: center; text-align: left; cursor: pointer; background: #16211a; border: 1px solid #3a4a3a; color: #cfe8cf; padding: 8px 10px; font: inherit; text-transform: capitalize; }
+  .craftbtn span { color: #8a9; font-size: 11px; }
+  .craftbtn.no { opacity: 0.45; }
+  .craftbtn:hover { background: #1e2f22; }
+  #craft .hint { margin-top: 12px; color: #778; font-size: 11px; }
+  #binds .rows { display: grid; grid-template-columns: 1fr; gap: 3px; }
+  #binds .row { display: flex; justify-content: space-between; border-bottom: 1px solid #1e2a1e; padding: 4px 2px; }
+  #binds .row b { color: #e8d89f; }
+  #deathscreen { position: fixed; inset: 0; z-index: 40; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(40,0,0,0.5); color: #e0b0b0; text-shadow: 0 0 6px #000; }
+  #deathscreen.on { display: flex; }
+  #deathscreen .big { font-size: 40px; letter-spacing: 8px; color: #c33; }
+  #deathscreen .cause { margin-top: 10px; font-size: 15px; opacity: .8; }
+  #deathscreen .sub { margin-top: 18px; font-size: 12px; opacity: .6; letter-spacing: 2px; }
 </style>
 <script>
   // Point the web build at your multiplayer server (Render URL, or your home IP:port).
@@ -104,8 +141,22 @@
     <br>
     <span class="k">[ ]</span>/wheel palette · <span class="k">click</span> place · <span class="k">R</span> rotate ·
     <span class="k">+/-</span> scale · <span class="k">Space/C</span> fly · <span class="k">Backspace</span> delete ·
-    <span class="k">P</span> save · <span class="k">Tab</span> exit
+    <span class="k">P</span> save · <span class="k">`</span> exit
   </div>
+
+  <div id="hurt" class="overlay"></div>
+  <div id="bars">
+    <div>HEALTH</div><div class="bar"><i id="healthbar"></i></div>
+    <div style="margin-top:5px">HUNGER</div><div class="bar"><i id="hungerbar"></i></div>
+  </div>
+  <div id="hotbar"><b>AXE</b></div>
+  <div id="prompt"></div>
+  <div id="toast"></div>
+  <div id="bindsBtn">⌨ BINDS (K)</div>
+
+  <div id="craft" class="panel"><div class="card"><h2>CRAFTING &nbsp;·&nbsp; <span style="font-size:11px;letter-spacing:1px;color:#778">Tab / click outside to close</span></h2><div class="body"></div></div></div>
+  <div id="binds" class="panel"><div class="card"><h2>CONTROLS</h2><div class="rows"></div><div style="margin-top:12px;color:#778;font-size:11px">press K or click BINDS to close · every action has a keyboard bind</div></div></div>
+  <div id="deathscreen"><div class="big">YOU DIED</div><div class="cause"></div><div class="sub">respawning…</div></div>
 
   <div id="gate">click to look around</div>
 
