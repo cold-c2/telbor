@@ -1,0 +1,35 @@
+{
+  "name": "lowpoly-dread",
+  "version": "0.1.0",
+  "description": "Low-res analog-horror multiplayer walking sim (Three.js + Node + Electron)",
+  "type": "module",
+  "main": "electron-main.cjs",
+  "scripts": {
+    "server": "node server.js",
+    "app": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "three": "^0.160.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.cold.palefield",
+    "productName": "PaleField",
+    "asar": false,
+    "files": [
+      "**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "portable"
+    }
+  }
+}
