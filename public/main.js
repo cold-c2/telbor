@@ -591,7 +591,7 @@ function animateLimbs(fig, sw) {
 }
 
 // ------------------------------------------------------------------ main loop
-const FPS_CAP = 120;                 // render up to 120fps (high-refresh monitors), never more
+const FPS_CAP = 240;                 // don't let the throttle cap below the display; 120Hz+ monitors render at full rate
 let last = performance.now();
 let lastRender = 0;
 let walkPhase = 0;
@@ -1464,7 +1464,7 @@ function onLocalRespawn(x, z, nhp) {
 
 function updateSurvival(dt, run, moving) {
   if (!dead) {
-    hunger = Math.max(0, hunger - dt * (run && moving ? 0.9 : 0.4));   // drains; running burns faster
+    hunger = Math.max(0, hunger - dt * (run && moving ? 0.28 : 0.14));   // drains slowly; running burns a bit faster (~12min idle)
     if (hunger <= 0) { starveT += dt; if (starveT > 2) { starveT = 0; if (net && net.readyState === 1) net.send(JSON.stringify({ t: "starve" })); } }
     else starveT = 0;
   }
