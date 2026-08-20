@@ -87,11 +87,18 @@ function noiseTexture(base, spread, size = 32) {
 // ------------------------------------------------------------------ terrain height + biome
 // ONE shared height field, used by both the mesh and the analytic ground-follow.
 function terrainHeight(x, z) {   // MUST stay identical to server.js terrainHeight (animals stand on it)
-  const big  = Math.sin(x * 0.018) * 4.2 + Math.cos(z * 0.021) * 4.0;                     // big rolling hills
-  const ridge = (1.0 - Math.abs(Math.sin(x * 0.032 + Math.cos(z * 0.028) * 1.3))) * 3.6;  // ridged crests (hilly + shaded valleys)
-  const med  = Math.sin(x * 0.05) * 0.9 + Math.cos(z * 0.06) * 0.8;                       // medium bumps
-  const fine = Math.sin((x + z) * 0.11) * 0.4;                                            // fine ripple
-  return big + ridge + med + fine;
+  const big  = Math.sin(x * 0.016) * 5.0 + Math.cos(z * 0.019) * 4.6;                     // broad rolling hills (taller)
+  const ridge = (1.0 - Math.abs(Math.sin(x * 0.03 + Math.cos(z * 0.026) * 1.3))) * 4.2;   // ridged crests
+  const med  = Math.sin(x * 0.05) * 1.0 + Math.cos(z * 0.06) * 0.9;                       // medium bumps
+  const fine = Math.sin((x + z) * 0.11) * 0.45 + Math.sin(x * 0.17 - z * 0.13) * 0.25;    // fine ripple
+  // SHORT CLIFFS: quantize the broad hills into 2m terraces over ~half the map
+  const terr = Math.round((big * 0.5) / 2.0) * 2.0;
+  const cliffMask = Math.max(0, Math.sin(x * 0.012 + 2.1) * Math.cos(z * 0.011 - 1.3));
+  const terraced = big + (terr - big) * cliffMask * 0.7;
+  // TALL HILL CLIFFS: a steep escarpment where a low-freq field crosses a threshold
+  const esc = Math.sin(x * 0.008 - 1.7) + Math.cos(z * 0.0075 + 0.6);
+  const escarp = esc > 1.0 ? (esc - 1.0) * 16 : 0;
+  return terraced + ridge + med + fine + escarp;
 }
 // low-frequency, seeded forest-density field: some regions are dense woods, others open plains
 function fbm2(x, z) {
@@ -113,7 +120,7 @@ function snowAmount(x, z) { const r = Math.hypot(x, z); return Math.max(0, Math.
 const groundTex = noiseTexture([150, 150, 150], 34, 48);   // grey; vertex colors do the tinting
 groundTex.repeat.set(95, 95);
 const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(720, 720, 150, 150),
+  new THREE.PlaneGeometry(720, 720, 210, 210),   // higher detail so cliffs/terraces read crisply
   ps1Material({ map: groundTex, vertexColors: true })
 );
 ground.rotation.x = -Math.PI / 2;
@@ -194,12 +201,12 @@ function addTree(px, pz, kind, s) {
   t.userData.chop = { hp: 5, wood: 2 + Math.round(s), col };   // axe target: yields wood
   forest.add(t);
 }
-// density-driven scatter: dense forest in high-forestDensity regions, real clearings in the plains
-for (let i = 0; i < 1500; i++) {
+// density-driven scatter: SUPER-dense forest in high-forestDensity regions, real clearings in the plains
+for (let i = 0; i < 2600; i++) {
   const a = rand() * Math.PI * 2, r = 8 + Math.sqrt(rand()) * 330;
   const px = Math.cos(a) * r, pz = Math.sin(a) * r;
   const dens = forestDensity(px, pz);
-  if (rand() > dens * dens) continue;              // clearings stay open (plains); dense zones fill in
+  if (rand() > dens * 1.15) continue;              // clearings stay open (plains); dense zones pack in tight
   const snowy = snowAmount(px, pz) > 0.4;
   const roll = rand();
   const kind = snowy ? (roll < 0.9 ? "tall" : "pine")
@@ -442,6 +449,7 @@ addEventListener("keydown", (e) => {
     case "KeyF":   primaryAction(); break;                                     // mirror of left-click
     case "KeyE":   interact();      break;                                     // pick up / eat / light fire / remove
     case "KeyR":   if (activeItem === "build") buildRot += Math.PI / 2; break; // rotate build ghost
+    case "KeyX":   breakBuild(); break;                                        // break the build you're looking at
     case "BracketLeft":  if (activeItem === "build") cyclePiece(-1); break;
     case "BracketRight": if (activeItem === "build") cyclePiece(1);  break;
   }
@@ -450,11 +458,72 @@ addEventListener("mousedown", (e) => { if (e.button === 2 && locked && !editing)
 addEventListener("mouseup",   (e) => { if (e.button === 2) rmbAim = false; });
 addEventListener("contextmenu", (e) => e.preventDefault());
 
+// ------------------------------------------------------------------ mobile / touch controls
+const isMobile = (window.matchMedia && matchMedia("(pointer: coarse)").matches) || /Android|iPhone|iPad|iPod|Mobile|Silk/i.test(navigator.userAgent);
+let touchMode = false;
+const touchMove = { x: 0, y: 0 };      // -1..1 joystick vector (x = strafe, y = forward/back)
+if (isMobile) {
+  document.body.classList.add("mobile");
+  gate.textContent = "TAP TO PLAY";
+  function mobileStart() { if (touchMode) return; touchMode = true; locked = true; gate.classList.add("hidden"); if (typeof resumeAudio === "function") resumeAudio(); }
+  const stick = document.getElementById("stick"), knob = document.getElementById("knob");
+  let moveId = null, moveOx = 0, moveOy = 0, lookId = null, lookLx = 0, lookLy = 0;
+  const MAXR = 52;
+  function tStart(e) {
+    mobileStart();
+    for (const t of e.changedTouches) {
+      if (t.target && t.target.closest && t.target.closest(".btn-touch")) continue;   // buttons handle themselves
+      const left = t.clientX < innerWidth * 0.5;
+      if (left && moveId === null) {
+        moveId = t.identifier; moveOx = t.clientX; moveOy = t.clientY;
+        if (stick) { stick.style.left = (t.clientX - 60) + "px"; stick.style.top = (t.clientY - 60) + "px"; stick.style.display = "block"; }
+      } else if (!left && lookId === null) { lookId = t.identifier; lookLx = t.clientX; lookLy = t.clientY; }
+    }
+  }
+  function tMove(e) {
+    for (const t of e.changedTouches) {
+      if (t.identifier === moveId) {
+        let dx = t.clientX - moveOx, dy = t.clientY - moveOy; const mag = Math.hypot(dx, dy);
+        if (mag > MAXR) { dx = dx / mag * MAXR; dy = dy / mag * MAXR; }
+        if (knob) knob.style.transform = `translate(${dx}px,${dy}px)`;
+        touchMove.x = dx / MAXR; touchMove.y = dy / MAXR;
+      } else if (t.identifier === lookId) {
+        const dx = t.clientX - lookLx, dy = t.clientY - lookLy; lookLx = t.clientX; lookLy = t.clientY;
+        headYaw -= dx * 0.005; pitch = Math.max(-1.3, Math.min(1.3, pitch - dy * 0.005));
+      }
+    }
+  }
+  function tEnd(e) {
+    for (const t of e.changedTouches) {
+      if (t.identifier === moveId) { moveId = null; touchMove.x = 0; touchMove.y = 0; if (knob) knob.style.transform = ""; if (stick) stick.style.display = "none"; }
+      else if (t.identifier === lookId) lookId = null;
+    }
+  }
+  addEventListener("touchstart", tStart, { passive: false });
+  addEventListener("touchmove", (e) => { if (touchMode) e.preventDefault(); tMove(e); }, { passive: false });
+  addEventListener("touchend", tEnd); addEventListener("touchcancel", tEnd);
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("touchstart", (e) => { e.preventDefault(); e.stopPropagation(); fn(); }, { passive: false }); };
+  bind("tb-fire", () => primaryAction());
+  bind("tb-aim", () => { rmbAim = !rmbAim; document.getElementById("tb-aim")?.classList.toggle("on", rmbAim); });
+  bind("tb-int", () => interact());
+  bind("tb-crouch", () => { crouchToggle = !crouchToggle; document.getElementById("tb-crouch")?.classList.toggle("on", crouchToggle); });
+  bind("tb-axe", () => setItem("axe"));
+  bind("tb-gun", () => setItem("rifle"));
+  bind("tb-build", () => setItem("build"));
+  bind("tb-craft", () => toggleCraft());
+  bind("tb-break", () => breakBuild());
+  bind("tb-rot", () => { buildRot += Math.PI / 2; });
+  bind("tb-cyc", () => cyclePiece(1));
+}
+
 // ------------------------------------------------------------------ multiplayer
 const remote = new Map(); // id -> figure
 let net = null, myId = null;
+// a persistent per-browser id so the server can save & restore YOUR inventory/build/position across sessions
+const PID = (() => { try { let p = localStorage.getItem("telbor_pid"); if (!p) { p = "p" + Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem("telbor_pid", p); } return p; } catch { return "anon"; } })();
 function connect() {
   net = new WebSocket(SERVER.replace(/^http/, "ws"));   // http->ws, https->wss
+  net.onopen = () => { try { net.send(JSON.stringify({ t: "hello", pid: PID })); } catch {} };
   net.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.t === "welcome") {
@@ -485,6 +554,12 @@ function connect() {
       if (m.id === myId) onLocalDeath(m.cause); else killRemote(remote.get(m.id));
     } else if (m.t === "respawn") {
       if (m.id === myId) onLocalRespawn(m.x, m.z, m.hp); else reviveRemote(remote.get(m.id), m.x, m.z);
+    } else if (m.t === "restore") {           // server handed back our saved inventory/hunger/position
+      if (m.inv) Object.assign(inv, m.inv);
+      if (typeof m.hunger === "number") hunger = m.hunger;
+      if (typeof m.hp === "number") hp = m.hp;
+      if (typeof m.x === "number") playerPos.set(m.x, 0, m.z);
+      updateHotbarHUD(); updateBars();
     } else if (m.t === "build") {
       addBuild(m.b);
     } else if (m.t === "unbuild") {
@@ -619,14 +694,18 @@ function frame(now) {
   // --- input (movement is relative to where you're LOOKING) ---
   const menuBlock = menuOpen || dead;
   crouching = ((keys["ControlLeft"] || keys["ControlRight"]) || crouchToggle) && !editing && !dead;
-  const run = !menuBlock && (keys["ShiftLeft"] || keys["ShiftRight"]) && !crouching;
+  const touchMag = Math.hypot(touchMove.x, touchMove.y);
+  const run = !menuBlock && ((keys["ShiftLeft"] || keys["ShiftRight"]) || (touchMode && touchMag > 0.92)) && !crouching;
   const speed = run ? 6.2 : crouching ? 1.6 : 3.1;
   let fwd = 0, str = 0;
   if (!menuBlock) {
-    if (keys["KeyW"]) fwd += 1;
-    if (keys["KeyS"]) fwd -= 1;
-    if (keys["KeyD"]) str += 1;
-    if (keys["KeyA"]) str -= 1;
+    if (touchMode && touchMag > 0.18) { fwd = -touchMove.y; str = touchMove.x; }   // virtual joystick
+    else {
+      if (keys["KeyW"]) fwd += 1;
+      if (keys["KeyS"]) fwd -= 1;
+      if (keys["KeyD"]) str += 1;
+      if (keys["KeyA"]) str -= 1;
+    }
   }
   const moving = fwd || str;
 
@@ -1004,13 +1083,21 @@ function makeDeer() {
   g.add(makeBlobShadow(0.85));
   g.userData.legs = legs; return g;
 }
-function makeWendigo() {                            // tall, dark, skinny figure
+// variant looks: stalker = tall/thin/black, brute = short/wide/grey, screamer = pale with a gaping maw
+const WEN_LOOK = {
+  stalker:  { col: 0x141416, sc: 1.0,  bodyW: 0.4, bodyH: 1.5, ant: 0x8a8a80 },
+  brute:    { col: 0x2a2422, sc: 1.25, bodyW: 0.7, bodyH: 1.5, ant: 0x6a3020 },
+  screamer: { col: 0xb9b3a6, sc: 1.05, bodyW: 0.34, bodyH: 1.6, ant: 0xe8e2d6 },
+};
+function makeWendigo(variant) {                     // tall, dark, skinny figure (variant tweaks size/colour)
+  const L = WEN_LOOK[variant] || WEN_LOOK.stalker;
   const g = new THREE.Group();
-  const dark = ps1Material({ color: 0x141416 });
-  const wbody = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.5, 0.28), dark); wbody.position.y = 2.35; g.add(wbody);
-  const whead = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.42, 0.3), dark); whead.position.y = 3.25; g.add(whead);
-  const antMat = ps1Material({ color: 0x8a8a80 });
-  for (const s of [-1, 1]) { const a = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.7, 4), antMat); a.position.set(s * 0.12, 3.65, 0); a.rotation.z = s * 0.4; g.add(a); }
+  const dark = ps1Material({ color: L.col });
+  const wbody = new THREE.Mesh(new THREE.BoxGeometry(L.bodyW, L.bodyH, 0.28 * L.sc), dark); wbody.position.y = 2.35; g.add(wbody);
+  const whead = new THREE.Mesh(new THREE.BoxGeometry(0.3 * L.sc, 0.42, 0.3 * L.sc), dark); whead.position.y = 3.25; g.add(whead);
+  if (variant === "screamer") { const maw = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.26, 0.08), new THREE.MeshBasicMaterial({ color: 0x4a0d12, fog: true })); maw.position.set(0, 3.2, 0.16 * L.sc); g.add(maw); }
+  const antMat = ps1Material({ color: L.ant });
+  for (const s of [-1, 1]) { const a = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.7 * L.sc, 4), antMat); a.position.set(s * 0.12, 3.65, 0); a.rotation.z = s * 0.4; g.add(a); }
   // limbs pivot from the joint (shoulder / hip) and hang DOWN — same rig as makePaleFigure's limb(),
   // so the stride code swings them from the hip instead of sliding a centered box.
   function wlimb(x, y, w, h) {
@@ -1018,10 +1105,11 @@ function makeWendigo() {                            // tall, dark, skinny figure
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), dark); mesh.position.y = -h / 2;
     pivot.add(mesh); g.add(pivot); return pivot;
   }
-  wlimb(-0.34, 3.0, 0.12, 1.5);                    // arms hang from the shoulders
-  wlimb( 0.34, 3.0, 0.12, 1.5);
-  const legs = [ wlimb(-0.14, 1.65, 0.16, 1.65), wlimb(0.14, 1.65, 0.16, 1.65) ];   // legs swing from the hips (feet reach the ground)
-  g.add(makeBlobShadow(0.55));
+  const aw = 0.12 * L.sc, lw = 0.16 * L.sc;
+  wlimb(-0.34 * L.sc, 3.0, aw, 1.5);               // arms hang from the shoulders
+  wlimb( 0.34 * L.sc, 3.0, aw, 1.5);
+  const legs = [ wlimb(-0.14 * L.sc, 1.65, lw, 1.65), wlimb(0.14 * L.sc, 1.65, lw, 1.65) ];   // legs swing from the hips (feet stay grounded)
+  g.add(makeBlobShadow(0.55 * L.sc));
   g.userData.legs = legs; return g;
 }
 function animalRoot(obj) { let o = obj; while (o && o.parent !== animalGroup) o = o.parent; return o; }
@@ -1032,7 +1120,7 @@ function applyAnimals(list) {
     seen.add(s.id);
     let r = netAnimals.get(s.id);
     if (!r) {
-      const mesh = (s.k === "wendigo") ? makeWendigo() : makeDeer();
+      const mesh = (s.k === "wendigo") ? makeWendigo(s.v) : makeDeer();
       mesh.userData.aid = s.id; mesh.position.set(s.x, terrainHeight(s.x, s.z), s.z);
       animalGroup.add(mesh);
       r = { mesh, kind: s.k, tx: s.x, tz: s.z, tr: s.ry, px: s.x, pz: s.z, phase: 0 };
@@ -1483,8 +1571,8 @@ function updateSurvival(dt, run, moving) {
 // ---- building: shaped pieces, socket/grid snap, server-synced ----
 const buildMat = ps1Material({ map: noiseTexture([124, 92, 58], 24) });   // planks
 const buildMatDark = ps1Material({ color: 0x4a3520 });
-const BUILD_PIECES = ["foundation", "wall", "doorway", "floor", "campfire"];
-const PIECE_COST = { foundation: 10, wall: 5, doorway: 6, floor: 8, campfire: 5 };
+const BUILD_PIECES = ["foundation", "wall", "doorway", "window", "halfwall", "floor", "roof", "ramp", "pillar", "block", "campfire"];
+const PIECE_COST = { foundation: 10, wall: 5, doorway: 6, window: 6, halfwall: 3, floor: 8, roof: 8, ramp: 7, pillar: 4, block: 2, campfire: 5 };
 let buildPiece = "foundation", buildRot = 0, buildTarget = null;
 const buildings = new THREE.Group(); scene.add(buildings);
 const buildRecords = new Map();
@@ -1503,6 +1591,20 @@ function makeBuildPiece(piece) {
   } else if (piece === "doorway") {
     for (const sx of [-1, 1]) { const post = new THREE.Mesh(new THREE.BoxGeometry(1.0, 3, 0.2), buildMat); post.position.set(sx * 1.5, 1.5, 0); g.add(post); }
     const lintel = new THREE.Mesh(new THREE.BoxGeometry(4, 0.7, 0.2), buildMat); lintel.position.set(0, 2.65, 0); g.add(lintel);
+  } else if (piece === "window") {
+    for (const sx of [-1, 1]) { const post = new THREE.Mesh(new THREE.BoxGeometry(1.0, 3, 0.2), buildMat); post.position.set(sx * 1.5, 1.5, 0); g.add(post); }
+    const top = new THREE.Mesh(new THREE.BoxGeometry(2, 0.9, 0.2), buildMat); top.position.set(0, 2.55, 0); g.add(top);
+    const bot = new THREE.Mesh(new THREE.BoxGeometry(2, 0.9, 0.2), buildMat); bot.position.set(0, 0.45, 0); g.add(bot);
+  } else if (piece === "halfwall") {
+    const w = new THREE.Mesh(new THREE.BoxGeometry(4, 1.4, 0.2), buildMat); w.position.y = 0.7; g.add(w);
+  } else if (piece === "roof") {
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 4), buildMatDark); slab.position.y = 0.1; g.add(slab);
+  } else if (piece === "ramp") {
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(4, 0.25, 5.7), buildMat); slab.rotation.x = -Math.atan2(3, 4); slab.position.y = 1.5; g.add(slab);
+  } else if (piece === "pillar") {
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.36, 3, 6), buildMat); p.position.y = 1.5; g.add(p);
+  } else if (piece === "block") {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), buildMat); b.position.y = 0.5; g.add(b);
   } else if (piece === "campfire") {
     const ring = new THREE.Mesh(new THREE.TorusGeometry(0.55, 0.14, 5, 8), rockMat0); ring.rotation.x = Math.PI / 2; ring.position.y = 0.14; g.add(ring);
     for (let i = 0; i < 4; i++) { const log = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.9, 5), buildMatDark); log.position.y = 0.18; log.rotation.set(0, i * 0.8, Math.PI / 2 - 0.2 + i * 0.12); g.add(log); }
@@ -1525,15 +1627,23 @@ function nearestBuildOf(piece, px, pz, range) {
 function computeBuildSnap() {
   raycaster.setFromCamera({ x: 0, y: 0 }, camera);
   const hit = raycaster.intersectObjects([ground, ...buildings.children], true)[0];
-  let px = playerPos.x - Math.sin(headYaw) * 4, pz = playerPos.z - Math.cos(headYaw) * 4;
-  if (hit && hit.distance < 12) { px = hit.point.x; pz = hit.point.z; }
-  if (buildPiece === "campfire") return { x: +px.toFixed(2), y: terrainHeight(px, pz), z: +pz.toFixed(2), ry: buildRot };
-  if (buildPiece === "foundation" || buildPiece === "floor") {
-    const gx = Math.round(px / 4) * 4, gz = Math.round(pz / 4) * 4;
-    if (buildPiece === "floor") { const f = nearestBuildOf("foundation", gx, gz, 1.0); return { x: gx, y: (f ? f.y : terrainHeight(gx, gz)) + 3, z: gz, ry: 0 }; }
-    return { x: gx, y: terrainHeight(gx, gz), z: gz, ry: 0 };
+  let px = playerPos.x - Math.sin(headYaw) * 4, pz = playerPos.z - Math.cos(headYaw) * 4, hy = null;
+  if (hit && hit.distance < 14) { px = hit.point.x; pz = hit.point.z; hy = hit.point.y; }
+  const P = buildPiece;
+  if (P === "campfire" || P === "ramp") return { x: +px.toFixed(2), y: terrainHeight(px, pz), z: +pz.toFixed(2), ry: buildRot };
+  if (P === "block") {                        // 1m grid, stacks on whatever you look at
+    const gy = hy != null ? Math.round(hy) : Math.round(terrainHeight(px, pz));
+    return { x: Math.round(px), y: gy, z: Math.round(pz), ry: 0 };
   }
-  // wall / doorway snap to nearest foundation edge (socket-style)
+  if (P === "pillar") { const gx = Math.round(px / 2) * 2, gz = Math.round(pz / 2) * 2; return { x: gx, y: terrainHeight(gx, gz), z: gz, ry: 0 }; }
+  if (P === "foundation" || P === "floor" || P === "roof") {
+    const gx = Math.round(px / 4) * 4, gz = Math.round(pz / 4) * 4;
+    if (P === "foundation") return { x: gx, y: terrainHeight(gx, gz), z: gz, ry: 0 };
+    const f = nearestBuildOf("foundation", gx, gz, 1.0);
+    const base = (f ? f.y : terrainHeight(gx, gz)) + (P === "roof" ? 3.1 : 3);
+    return { x: gx, y: base, z: gz, ry: 0 };
+  }
+  // wall / doorway / window / halfwall snap to nearest foundation edge (socket-style)
   const near = nearestBuildOf("foundation", px, pz, 4.5);
   if (near) {
     const edges = [ { x: near.x, z: near.z + 2, ry: 0 }, { x: near.x, z: near.z - 2, ry: 0 },
@@ -1556,6 +1666,20 @@ function placeBuild() {
   inv.wood -= cost; updateHotbarHUD();
   if (net && net.readyState === 1) net.send(JSON.stringify({ t: "build", piece: buildPiece, x: buildTarget.x, y: buildTarget.y, z: buildTarget.z, ry: buildTarget.ry }));
 }
+function breakBuild() {                       // look at any build piece and remove it (refunds half the wood)
+  if (dead || menuOpen || editing) return;
+  raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+  const hits = raycaster.intersectObjects(buildings.children, true);
+  if (!hits.length || hits[0].distance > 8) { showToast("look at a build to break it"); return; }
+  let o = hits[0].object; while (o && (o.userData.bid == null)) o = o.parent;
+  if (o && o.userData.bid != null) {
+    const rec = buildRecords.get(o.userData.bid);
+    const refund = rec ? Math.floor((PIECE_COST[rec.piece] || 0) * 0.5) : 0;
+    if (refund) { inv.wood += refund; updateHotbarHUD(); }
+    if (net && net.readyState === 1) net.send(JSON.stringify({ t: "unbuild", id: o.userData.bid }));
+    showToast("broke " + (rec ? rec.piece : "build") + (refund ? " (+" + refund + " wood)" : ""));
+  }
+}
 function pushWallColliders(rec) {
   const dirx = Math.cos(rec.ry), dirz = -Math.sin(rec.ry); rec.cols = [];
   for (const o of [-1.3, 0, 1.3]) { const c = { x: rec.x + dirx * o, z: rec.z + dirz * o, r: 0.55 }; colliders.push(c); rec.cols.push(c); }
@@ -1566,9 +1690,11 @@ function addBuild(b) {
   buildings.add(mesh);
   const rec = { id: b.id, piece: b.piece, mesh, x: b.x, y: b.y, z: b.z, ry: b.ry || 0, by: b.by, lit: false, fuel: 0, cookQueue: 0, cookT: 0, cols: [] };
   buildRecords.set(b.id, rec);
-  if (b.piece === "wall") pushWallColliders(rec);
+  if (b.piece === "wall" || b.piece === "window" || b.piece === "halfwall") pushWallColliders(rec);
   else if (b.piece === "doorway") { const dirx = Math.cos(rec.ry), dirz = -Math.sin(rec.ry); for (const o of [-1.5, 1.5]) { const c = { x: b.x + dirx * o, z: b.z + dirz * o, r: 0.5 }; colliders.push(c); rec.cols.push(c); } }
   else if (b.piece === "campfire") { const c = { x: b.x, z: b.z, r: 0.6 }; colliders.push(c); rec.cols.push(c); }
+  else if (b.piece === "block") { const c = { x: b.x, z: b.z, r: 0.72 }; colliders.push(c); rec.cols.push(c); }
+  else if (b.piece === "pillar") { const c = { x: b.x, z: b.z, r: 0.4 }; colliders.push(c); rec.cols.push(c); }
 }
 function removeBuild(id) {
   const rec = buildRecords.get(id); if (!rec) return;
@@ -1658,6 +1784,8 @@ document.getElementById("bindsBtn")?.addEventListener("click", toggleBinds);
 for (const pid of ["craft", "binds"]) { const p = document.getElementById(pid); if (p) p.addEventListener("mousedown", e => { if (e.target === p) closeMenus(); }); }
 
 rebuildBuildGhost(); updateHotbarHUD(); updateBars();
+// push inventory + hunger to the server every 8s so it can persist YOUR data
+setInterval(() => { if (net && net.readyState === 1) net.send(JSON.stringify({ t: "save", inv, hunger })); }, 8000);
 
 // ------------------------------------------------------------------ boot the content pipeline
 (async () => { await loadManifest(); await loadMap("main"); })();
