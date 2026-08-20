@@ -104,6 +104,30 @@
   #deathscreen .big { font-size: 40px; letter-spacing: 8px; color: #c33; }
   #deathscreen .cause { margin-top: 10px; font-size: 15px; opacity: .8; }
   #deathscreen .sub { margin-top: 18px; font-size: 12px; opacity: .6; letter-spacing: 2px; }
+
+  /* ---- mobile touch controls (only shown on touch devices) ---- */
+  #touch { display: none; }
+  body.mobile { touch-action: none; }
+  body.mobile #touch { display: block; }
+  body.mobile #bindsBtn { top: 10px; right: 10px; }
+  #stick { position: fixed; width: 120px; height: 120px; border-radius: 50%; border: 2px solid rgba(200,220,200,0.35); background: rgba(0,0,0,0.22); z-index: 25; display: none; pointer-events: none; }
+  #knob { position: absolute; left: 35px; top: 35px; width: 50px; height: 50px; border-radius: 50%; background: rgba(200,220,200,0.5); }
+  .btn-touch { position: fixed; z-index: 26; pointer-events: auto; -webkit-user-select: none; user-select: none; touch-action: none;
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    background: rgba(0,0,0,0.42); border: 1px solid #4a5a4a; color: #cfe8cf; font: 12px "Courier New", monospace; border-radius: 10px; letter-spacing: 1px; }
+  .btn-touch.on { background: rgba(60,110,60,0.6); border-color: #7fd07f; }
+  .btn-touch:active { background: rgba(80,120,80,0.7); }
+  #tb-fire { right: 24px; bottom: 92px; width: 92px; height: 92px; border-radius: 50%; font-size: 14px; }
+  #tb-aim { right: 128px; bottom: 146px; width: 60px; height: 60px; border-radius: 50%; }
+  #tb-int { right: 128px; bottom: 72px; width: 60px; height: 60px; border-radius: 50%; }
+  #tb-crouch { right: 30px; bottom: 196px; width: 60px; height: 60px; border-radius: 50%; }
+  #tb-rot { right: 96px; bottom: 250px; width: 56px; height: 40px; }
+  #tb-cyc { right: 30px; bottom: 262px; width: 60px; height: 40px; }
+  #tb-axe { left: 50%; margin-left: -150px; bottom: 12px; width: 56px; height: 42px; }
+  #tb-gun { left: 50%; margin-left: -90px; bottom: 12px; width: 56px; height: 42px; }
+  #tb-build { left: 50%; margin-left: -30px; bottom: 12px; width: 56px; height: 42px; }
+  #tb-craft { left: 50%; margin-left: 30px; bottom: 12px; width: 56px; height: 42px; }
+  #tb-break { left: 50%; margin-left: 90px; bottom: 12px; width: 56px; height: 42px; }
 </style>
 <script>
   // Point the web build at your multiplayer server (Render URL, or your home IP:port).
@@ -157,6 +181,21 @@
   <div id="craft" class="panel"><div class="card"><h2>CRAFTING &nbsp;·&nbsp; <span style="font-size:11px;letter-spacing:1px;color:#778">Tab / click outside to close</span></h2><div class="body"></div></div></div>
   <div id="binds" class="panel"><div class="card"><h2>CONTROLS</h2><div class="rows"></div><div style="margin-top:12px;color:#778;font-size:11px">press K or click BINDS to close · every action has a keyboard bind</div></div></div>
   <div id="deathscreen"><div class="big">YOU DIED</div><div class="cause"></div><div class="sub">respawning…</div></div>
+
+  <div id="touch">
+    <div id="stick"><div id="knob"></div></div>
+    <div class="btn-touch" id="tb-fire">USE</div>
+    <div class="btn-touch" id="tb-aim">AIM</div>
+    <div class="btn-touch" id="tb-int">E</div>
+    <div class="btn-touch" id="tb-crouch">CRCH</div>
+    <div class="btn-touch" id="tb-rot">ROT</div>
+    <div class="btn-touch" id="tb-cyc">NEXT</div>
+    <div class="btn-touch" id="tb-axe">AXE</div>
+    <div class="btn-touch" id="tb-gun">GUN</div>
+    <div class="btn-touch" id="tb-build">BLD</div>
+    <div class="btn-touch" id="tb-craft">CRAFT</div>
+    <div class="btn-touch" id="tb-break">BRK</div>
+  </div>
 
   <div id="gate">click to look around</div>
 
